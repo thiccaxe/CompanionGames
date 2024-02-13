@@ -15,11 +15,12 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+import logging
+from asyncio import BaseTransport
+
 """
 This file includes a significant portion of pyatv - see ATTRIBUTION.txt
 """
-
-
 
 import asyncio
 import binascii
@@ -35,7 +36,7 @@ from pyatv.protocols.companion.connection import (
 from pyatv.protocols.companion.protocol import (
     FrameType,
 )
-from pyatv.protocols.companion.server_auth import CompanionServerAuth
+from modified_companion_auth import CompanionServerAuth, SERVER_IDENTIFIER, PUBLIC_ID, BLUETOOTH_ADDRESS, _print
 from pyatv.support import (
     chacha20,
     opack,
@@ -44,16 +45,15 @@ from rich import print
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncZeroconf, AsyncServiceInfo
 
-SERVER_NAME = "NotUxPlay"
-BLUETOOTH_ADDRESS = "DA:97:7C:BA:A3:7B"
-PUBLIC_ID = "69:9C:57:22:6D:92"
-AIRPLAY_IDENTIFIER = "4D797FD3-3538-427E-A47B-A32FC6CFDDDD"
-SERVER_IDENTIFIER = "4D797FD3-3538-427E-A47B-A32FC6CFDDDD"
+SERVER_NAME = "Companion Games"
+
+AIRPLAY_IDENTIFIER = SERVER_IDENTIFIER
+
 ADDRESS = "192.168.1.35"
-SERVER_ADDRESSES = [inet_aton(ADDRESS),]
+SERVER_ADDRESSES = [inet_aton(ADDRESS), ]
 SERVER_PORT = 34689
-SERVER_APPLETV_VERSION="523.1.2"
-SERVER_APPLETV_MODEL="AppleTV5,3"
+SERVER_APPLETV_VERSION = "523.1.2"
+SERVER_APPLETV_MODEL = "AppleTV5,3"
 
 COMPANION_AUTH_FRAMES = [
     FrameType.PS_Start,
@@ -69,19 +69,28 @@ COMPANION_OPACK_FRAMES = [
 ]
 
 
+async def keyboard_interrupt():
+    while True:
+        try:
+            await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            raise SystemExit
+
+
 class CompanionZeroconfRegistration:
 
     def __init__(self):
         self.aiozc = AsyncZeroconf(ip_version=IPVersion.V4Only)
-    
+
     async def register_service(self, service: AsyncServiceInfo):
         await self.aiozc.async_register_service(service)
-    
+
     async def unregister_service(self, service: AsyncServiceInfo):
         await self.aiozc.async_unregister_service(service)
 
     async def unregsiter_all_services(self):
         await self.aiozc.async_unregister_all_services()
+
 
 class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
     def __init__(self):
@@ -90,7 +99,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
             SERVER_IDENTIFIER,
             1234
         )
-        self.transport = None
+        self.transport: BaseTransport = None
         self.chacha: Optional[chacha20.Chacha20Cipher] = None
         self.packet_handlers = {
             "_systemInfo": self.handle_system_info_packet,
@@ -106,7 +115,6 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
         self.services = {}
         self.touch = None
 
-        
     def connection_made(self, transport):
         self.peername = transport.get_extra_info('peername')
         print('Connection from {}'.format(self.peername))
@@ -121,7 +129,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
         print(_id, 'Data received: {!r}'.format(binascii.hexlify(data)))
         offset = 0
         while True:
-            payload_length = 4 + int.from_bytes(data[(offset+1):(offset+4)], byteorder="big")
+            payload_length = 4 + int.from_bytes(data[(offset + 1):(offset + 4)], byteorder="big")
             print("Offset / Data Length / Payload Length", offset, data_len, payload_length)
             if (payload_length > (data_len - offset)):
                 print(_id, "break, data too small")
@@ -129,7 +137,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
 
             frame_type = FrameType(data[0])
             print(f"{frame_type=}")
-            frame_data = data[(offset+4):(offset+payload_length)]
+            frame_data = data[(offset + 4):(offset + payload_length)]
 
             self.handle_frame(frame_type, frame_data)
             offset += payload_length
@@ -138,15 +146,11 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                 break
         print(_id, "finished handling data.")
 
-        
-
-
-
     def handle_frame(self, frame_type, frame_data):
+        print(frame_data)
         if frame_type in COMPANION_AUTH_FRAMES:
             print("auth frame!")
             frame = opack.unpack(frame_data)
-            print(frame)
             try:
                 self.handle_auth_frame(frame_type, frame[0])
             except Exception as e:
@@ -158,19 +162,23 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                     print("opack frame; decode")
                     self.handle_play_frame(frame_type, frame_data)
             except Exception as e:
-                print(type(e), e)
+                _print(type(e), e)
                 print("error")
 
     def handle_play_frame(self, frame_type, frame_data):
-        if self.chacha and len(frame_data) > 0: # data is encrypted
+        print(binascii.hexlify(frame_data))
+        if self.chacha and len(frame_data) > 0:  # data is encrypted
+            print("play frame is encrypted")
             try:
                 header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
+                print(f"{header=}")
                 temp = self.chacha.decrypt(frame_data, aad=header)
+                print(binascii.hexlify(temp))
                 frame_data = temp
             except cryptography.exceptions.InvalidTag as e:
-                print(e)
+                _print(e)
                 print("not encrypted maybe?")
-        
+
         packet = opack.unpack(frame_data)[0]
         print(packet)
         response: dict = None
@@ -182,7 +190,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
             packet_type = packet["_i"]
             if packet_type in self.packet_handlers:
                 response = self.packet_handlers[packet_type](packet)
-        
+
         response = response if response else {}
         response.setdefault("_x", packet_nonce)
         response.setdefault("_t", 3)
@@ -190,12 +198,11 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
 
         self.send_to_client(frame_type, response)
 
-
-    
     def handle_system_info_packet(self, packet):
         try:
             print(opack.unpack(packet["_c"]["_siriInfo"]["sharedDataProtoBuf"]))
-        except Exception as e: print(e)
+        except Exception as e:
+            print(e)
         response = {
             "_c": {
                 "_pubID": PUBLIC_ID,
@@ -209,7 +216,12 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                 "model": SERVER_APPLETV_MODEL,
                 'name': SERVER_NAME,
                 '_dC': 'unknown', '_cf': 512, '_sf': 65536,
-                '_stA': ['com.apple.callservicesd.CompanionLinkManager', 'com.apple.bluetooth.remote', 'com.apple.workflow.remotewidgets', 'com.apple.coreduet.sync', 'com.apple.devicediscoveryui.rapportwake', 'com.apple.biomesyncd.rapport', 'com.apple.SeymourSession', 'com.apple.LiveAudio', 'com.apple.tvremoteservices', 'com.apple.wifivelocityd.rapportWake', 'com.apple.siri.wakeup', 'com.apple.siri.wakeup', 'com.apple.Seymour', 'com.apple.home.messaging'],
+                '_stA': ['com.apple.callservicesd.CompanionLinkManager', 'com.apple.bluetooth.remote',
+                         'com.apple.workflow.remotewidgets', 'com.apple.coreduet.sync',
+                         'com.apple.devicediscoveryui.rapportwake', 'com.apple.biomesyncd.rapport',
+                         'com.apple.SeymourSession', 'com.apple.LiveAudio', 'com.apple.tvremoteservices',
+                         'com.apple.wifivelocityd.rapportWake', 'com.apple.siri.wakeup', 'com.apple.siri.wakeup',
+                         'com.apple.Seymour', 'com.apple.home.messaging'],
 
             }
         }
@@ -229,7 +241,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
         if (service_type is None) or (client_sid is None):
             return
         if service_type in self.services:
-            return {    
+            return {
                 "_c": {
                     "_sid": self.services[service_type]["sid"]
                 }
@@ -258,13 +270,14 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                 del self.services[service_type]
         except KeyError:
             pass
+
     def handle_fetch_attention_state(self, packet):
         return {
             "_c": {
-                "state": 0x03 # Awake
+                "state": 0x03  # Awake
             }
         }
-    
+
     def handle_fetch_siri_remote_info(self, packet):
         return {
             '_c': {
@@ -294,7 +307,7 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
     def handle_touch_stop(self, packet):
         self.touch = None
         pass
-    
+
     def handle_hid_touchpad(self, packet):
         if self.touch:
             try:
@@ -303,11 +316,10 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                 since_touch_start = current_time_ns - self.touch['start']
                 diff = ns_packet - since_touch_start
                 diff_2 = self.services["com.apple.tvremoteservices"]["init_time"]
-                print(f"{ns_packet=}, {since_touch_start=}, {diff=}, {diff_2=}, diffdiff={diff-diff_2}")
+                print(f"{ns_packet=}, {since_touch_start=}, {diff=}, {diff_2=}, diffdiff={diff - diff_2}")
 
             except KeyError:
                 pass
-
 
     def send_bytes_to_client(self, frame_type: FrameType, data: bytes) -> None:
         """Send encoded data to client device (iOS)."""
@@ -334,13 +346,23 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
         """Enable encryption with the specified keys."""
         self.chacha = chacha20.Chacha20Cipher(output_key, input_key, nonce_length=12)
 
+    def has_paired(self):
+        self.transport.close()  # It's for the best
 
+
+class Manager:
+
+    def __init__(self) -> None:
+        pass
+
+    async def main(self):
+        pass
 
 
 async def main():
     loop = asyncio.get_running_loop()
     mdns = CompanionZeroconfRegistration()
-    
+
     def create_server():
         try:
             server = CompanionRemoteServer(),
@@ -350,20 +372,19 @@ async def main():
 
     server = await loop.create_server(
         lambda: CompanionRemoteServer(),
-        '0.0.0.0', 34689)
+        '0.0.0.0', 34689, start_serving=False)
 
-    
     records = {
-        "rpHA": "9948cfb6da55",#
-        "rpHN": "cef88e5db6fa",#
-        "rpAD": "3b2210518c58", #
-        "rpHI": "91756a18d8e5",# 
-        "rpMd": SERVER_APPLETV_MODEL,#
-        "rpVr": SERVER_APPLETV_VERSION,#
-        "rpMac": "2",#
-        "rpFl": "0XB6782", #
-        "rpBA": BLUETOOTH_ADDRESS,#
-        "rpMRtID": SERVER_IDENTIFIER,#
+        "rpHA": "9948cfb6da55",  #
+        "rpHN": "cef88e5db6fa",  #
+        "rpAD": "3b2210518c58",  #
+        "rpHI": "91756a18d8e5",  #
+        "rpMd": SERVER_APPLETV_MODEL,  #
+        "rpVr": SERVER_APPLETV_VERSION,  #
+        "rpMac": "2",  #
+        "rpFl": "0XB6782",  #
+        "rpBA": BLUETOOTH_ADDRESS,  #
+        "rpMRtID": SERVER_IDENTIFIER,  #
     }
 
     service = AsyncServiceInfo(
@@ -375,15 +396,29 @@ async def main():
         server=f"{SERVER_NAME}.local."
     )
     await mdns.register_service(service)
+    print("MDNS Registered")
 
+    # websocket_server = await serve()
     try:
-        async with server:
-            await server.serve_forever()
+        await server.start_serving()
+        print("Server Started")
+        await keyboard_interrupt()
+    except asyncio.CancelledError:
+        pass
     except KeyboardInterrupt:
-        await mdns.unregsiter_all_services()
-        server.close()
-    except asyncio.exceptions.CancelledError:
-        await mdns.unregsiter_all_services()
+        pass
+
+    await mdns.unregsiter_all_services()
+    print("MDNS Unregistered -- free to Ctrl+C Spam")
+    server.close()
+    await server.wait_closed()
+    print("Server Stopped")
+
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.DEBUG,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        format="%(asctime)s %(levelname)s [%(name)s]: %(message)s",
+    )
     asyncio.run(main())
