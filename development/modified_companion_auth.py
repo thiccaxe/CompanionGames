@@ -111,7 +111,7 @@ def new_server_session(keys, pin):
 class CompanionServerAuth(ABC):
     """Server-side implementation of Companion authentication."""
 
-    def __init__(self, device_name, unique_id=SERVER_IDENTIFIER, pin=PIN_CODE):
+    def __init__(self, device_name, allow_pair = True, unique_id=SERVER_IDENTIFIER, pin=PIN_CODE):
         """Initialize a new instance if CompanionServerAuth."""
         self.device_name = device_name
         self.unique_id = unique_id.encode()
@@ -120,6 +120,7 @@ class CompanionServerAuth(ABC):
         self.keys = generate_keys(PRIVATE_KEY)
         self.pin = pin
         self.session, self.salt = new_server_session(self.keys, pin)
+        self.allow_pair = allow_pair
 
     def handle_auth_frame(self, frame_type, data):
         """Handle incoming auth message."""
@@ -227,14 +228,22 @@ class CompanionServerAuth(ABC):
         self.enable_encryption(self.output_key, self.input_key)
 
     def _m1_setup(self, pairing_data):
-        tlv = write_tlv(
-            {
-                TlvValue.SeqNo: b"\x02",
-                TlvValue.Salt: binascii.unhexlify(self.salt),
-                TlvValue.PublicKey: binascii.unhexlify(self.session.public),
-                27: b"\x01",
-            }
-        )
+        if self.allow_pair:
+            tlv = write_tlv(
+                {
+                    TlvValue.SeqNo: b"\x02",
+                    TlvValue.Salt: binascii.unhexlify(self.salt),
+                    TlvValue.PublicKey: binascii.unhexlify(self.session.public),
+                    27: b"\x01",
+                }
+            )
+        else:
+            tlv = write_tlv(
+                {
+                    TlvValue.SeqNo: b"\x02",
+                    TlvValue.Error: b"\x06",
+                }
+            )
         print("AUTH - sending", tlv)
         self.send_to_client(FrameType.PS_Next, {"_pd": tlv, "_pwTy": 1})
 
