@@ -16,7 +16,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import logging
-from asyncio import BaseTransport
+from asyncio import BaseTransport, Transport
 
 """
 This file includes a significant portion of pyatv - see ATTRIBUTION.txt
@@ -29,7 +29,7 @@ from random import randbytes
 from socket import inet_aton
 from typing import Optional
 
-import cryptography
+import cryptography.exceptions
 from pyatv.protocols.companion.connection import (
     AUTH_TAG_LENGTH,
 )
@@ -44,6 +44,7 @@ from pyatv.support import (
 from rich import print
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncZeroconf, AsyncServiceInfo
+import pyautogui as pag
 
 SERVER_NAME = "Companion Games"
 
@@ -93,15 +94,17 @@ class CompanionZeroconfRegistration:
 
 
 class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
-    def __init__(self):
+    def __init__(self, shutdown_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
         super().__init__(
             SERVER_NAME,
+            True, # allow pairing or not
             SERVER_IDENTIFIER,
             1234
         )
-        self.transport: BaseTransport = None
-        self.chacha: Optional[chacha20.Chacha20Cipher] = None
-        self.packet_handlers = {
+        self.peername = None
+        self._transport: Transport = None
+        self._chacha: Optional[chacha20.Chacha20Cipher] = None
+        self._packet_handlers = {
             "_systemInfo": self.handle_system_info_packet,
             "_sessionStart": self.handle_session_start_packet,
             "_sessionStop": self.handle_session_stop_packet,
@@ -111,46 +114,88 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
             "_touchStart": self.handle_touch_start,
             "_touchStop": self.handle_touch_stop,
             "_hidT": self.handle_hid_touchpad,
+            "_hidC": self.handle_click,
         }
-        self.services = {}
-        self.touch = None
+        self._services = {}
+        self._touch = None
+        self._shutdown_event = shutdown_event
+        self.loop = loop
+        self._buffer = bytearray()
+        self._buffer_write_event = asyncio.Event()
+        self._is_connection_closed = False
+        self._buffer_read_task: Optional[asyncio.Future] = None
+
+    async def start(self) -> None:
+        self._buffer_read_task = asyncio.ensure_future(self._process_buffer())
 
     def connection_made(self, transport):
         self.peername = transport.get_extra_info('peername')
         print('Connection from {}'.format(self.peername))
-        self.transport = transport
+        self._transport = transport
+        self.loop.create_task(self.on_shutdown())
+
+    async def on_shutdown(self):
+        print("awaiting shutdown - ", self._shutdown_event.is_set())
+        await self._shutdown_event.wait()
+        if self._transport:
+            self.connection_lost(None)
+            print("shutting down transport")
+            self._transport.close()
 
     def connection_lost(self, error):
         print('Connection lost from {}'.format(self.peername))
+        self._is_connection_closed = True
 
+    async def _process_buffer(self):
+        while not self._shutdown_event.is_set() and not self._is_connection_closed:
+            try:
+                await self._buffer_write_event.wait()
+                # buffer has been written to
+                # copy buffer
+                data: bytearray = self._buffer.copy()
+                self._buffer.clear()
+                print("state of buffer", self._buffer)
+                self._buffer_write_event.clear()
+                print("Handling ", binascii.hexlify(data))
+                data_len = len(data)
+                offset = 0
+                while (data_len - offset) >= 4:  # Minimums size: 1 byte frame type + 3 byte length
+                    # generate a random id for this frame
+                    _id = int.from_bytes(randbytes(3), "big")
+                    # byte 1 to byte 4 is length; add 4 bytes for header.
+                    payload_length = 4 + int.from_bytes(data[(offset + 1):(offset + 4)], byteorder="big")
+                    print(f"{offset=} / {data_len=} / {payload_length=}")
+                    if payload_length > (data_len - offset):
+                        print(_id, "break, data too small")
+                        break
+                    # frame type is the first byte
+                    frame_type = FrameType(data[0])
+                    print(f"{frame_type=}")
+                    # frame data doesn't include packet type, just length and the data
+                    frame_data = data[(offset + 4):(offset + payload_length)]
+                    await self._handle_frame(frame_type, frame_data)
+                    offset += payload_length
+                    print(_id, offset)
+                    if offset == data_len:
+                        break
+                    print(_id, "finished handling data.")
+                # at this point, copy the unread data in the copied buffer to the start of our buffer.
+                self._buffer[0:0] = data[offset:]
+            except asyncio.CancelledError:
+                break
+
+        print("done processing buffer; connection over")
     def data_received(self, data):
-        data_len = len(data)
-        _id = int.from_bytes(randbytes(3), "big")
-        print(_id, 'Data received: {!r}'.format(binascii.hexlify(data)))
-        offset = 0
-        while True:
-            payload_length = 4 + int.from_bytes(data[(offset + 1):(offset + 4)], byteorder="big")
-            print("Offset / Data Length / Payload Length", offset, data_len, payload_length)
-            if (payload_length > (data_len - offset)):
-                print(_id, "break, data too small")
-                break
+        self._buffer += data
+        self._buffer_write_event.set()
 
-            frame_type = FrameType(data[0])
-            print(f"{frame_type=}")
-            frame_data = data[(offset + 4):(offset + payload_length)]
 
-            self.handle_frame(frame_type, frame_data)
-            offset += payload_length
-            print(_id, offset)
-            if (offset) == data_len:
-                break
-        print(_id, "finished handling data.")
 
-    def handle_frame(self, frame_type, frame_data):
-        print(frame_data)
+    async def _handle_frame(self, frame_type, frame_data):
+        print("Frame Data: ", frame_data)
         if frame_type in COMPANION_AUTH_FRAMES:
             print("auth frame!")
-            frame = opack.unpack(frame_data)
+            frame = opack.unpack(bytes(frame_data))
             try:
                 self.handle_auth_frame(frame_type, frame[0])
             except Exception as e:
@@ -160,19 +205,19 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
             try:
                 if frame_type in COMPANION_OPACK_FRAMES:
                     print("opack frame; decode")
-                    self.handle_play_frame(frame_type, frame_data)
+                    self._handle_play_frame(frame_type, frame_data)
             except Exception as e:
                 _print(type(e), e)
                 print("error")
 
-    def handle_play_frame(self, frame_type, frame_data):
+    def _handle_play_frame(self, frame_type, frame_data):
         print(binascii.hexlify(frame_data))
-        if self.chacha and len(frame_data) > 0:  # data is encrypted
+        if self._chacha and len(frame_data) > 0:  # data is encrypted
             print("play frame is encrypted")
             try:
                 header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
                 print(f"{header=}")
-                temp = self.chacha.decrypt(frame_data, aad=header)
+                temp = self._chacha.decrypt(bytes(frame_data), aad=header)
                 print(binascii.hexlify(temp))
                 frame_data = temp
             except cryptography.exceptions.InvalidTag as e:
@@ -188,8 +233,8 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
 
         if "_i" in packet:
             packet_type = packet["_i"]
-            if packet_type in self.packet_handlers:
-                response = self.packet_handlers[packet_type](packet)
+            if packet_type in self._packet_handlers:
+                response = self._packet_handlers[packet_type](packet)
 
         response = response if response else {}
         response.setdefault("_x", packet_nonce)
@@ -240,20 +285,20 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
         client_sid = packet["_c"]["_sid"]
         if (service_type is None) or (client_sid is None):
             return
-        if service_type in self.services:
+        if service_type in self._services:
             return {
                 "_c": {
-                    "_sid": self.services[service_type]["sid"]
+                    "_sid": self._services[service_type]["sid"]
                 }
             }
         server_sid = int.from_bytes(randbytes(4), "big")
-        self.services[service_type] = {
+        self._services[service_type] = {
             "client_sid": client_sid,
             "server_sid": server_sid,
             "sid": (client_sid << 32) | server_sid,
             "init_time": time.time_ns()
         }
-        print("Updated Service", self.services[service_type])
+        print("Updated Service", self._services[service_type])
         return {
             "_c": {
                 "_sid": server_sid
@@ -266,8 +311,8 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
             client_sid = packet["_c"]["_sid"]
             if service_type is None:
                 return
-            if service_type in self.services:
-                del self.services[service_type]
+            if service_type in self._services:
+                del self._services[service_type]
         except KeyError:
             pass
 
@@ -315,27 +360,39 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
                 current_time_ns = time.time_ns()
                 since_touch_start = current_time_ns - self.touch['start']
                 diff = ns_packet - since_touch_start
-                diff_2 = self.services["com.apple.tvremoteservices"]["init_time"]
+                diff_2 = self._services["com.apple.tvremoteservices"]["init_time"]
                 print(f"{ns_packet=}, {since_touch_start=}, {diff=}, {diff_2=}, diffdiff={diff - diff_2}")
 
             except KeyError:
                 pass
 
+    def handle_click(self, packet):
+        if self.touch:
+            try:
+                button_info = packet["_c"]
+                print("button info")
+                print(button_info["_hBtS"] == 1 and button_info["_hidC"] == 6)
+                if button_info["_hBtS"] == 1 and button_info["_hidC"] == 6:
+                    print("clicking")
+                    pag.leftClick()
+            except KeyError:
+                pass
+
     def send_bytes_to_client(self, frame_type: FrameType, data: bytes) -> None:
         """Send encoded data to client device (iOS)."""
-        if not self.transport:
+        if not self._transport:
             print("Tried to send to client, but not connected")
             return
 
         payload_length = len(data)
-        if self.chacha and payload_length > 0:
+        if self._chacha and payload_length > 0:
             payload_length += AUTH_TAG_LENGTH
         header = bytes([frame_type.value]) + payload_length.to_bytes(3, byteorder="big")
 
-        if self.chacha and len(data) > 0:
-            data = self.chacha.encrypt(data, aad=header)
+        if self._chacha and len(data) > 0:
+            data = self._chacha.encrypt(data, aad=header)
 
-        self.transport.write(header + data)
+        self._transport.write(header + data)
 
     def send_to_client(self, frame_type: FrameType, data: object) -> None:
         """Send data to client device (iOS)."""
@@ -344,10 +401,10 @@ class CompanionRemoteServer(CompanionServerAuth, asyncio.Protocol):
 
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         """Enable encryption with the specified keys."""
-        self.chacha = chacha20.Chacha20Cipher(output_key, input_key, nonce_length=12)
+        self._chacha = chacha20.Chacha20Cipher(output_key, input_key, nonce_length=12)
 
     def has_paired(self):
-        self.transport.close()  # It's for the best
+        self._transport.close()  # It's for the best
 
 
 class Manager:
@@ -360,18 +417,27 @@ class Manager:
 
 
 async def main():
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     mdns = CompanionZeroconfRegistration()
 
-    def create_server():
+    shutdown_event = asyncio.Event()
+
+    def protocol_factory():
         try:
-            server = CompanionRemoteServer(),
-            return server
-        except Exception as e:
-            print(e)
+            proxy = CompanionRemoteServer(
+                shutdown_event, loop
+            )
+            asyncio.ensure_future(
+                proxy.start(),
+                loop=loop,
+            )
+        except Exception:
+            print("failed to start proxy")
+            raise
+        return proxy
 
     server = await loop.create_server(
-        lambda: CompanionRemoteServer(),
+        protocol_factory,
         '0.0.0.0', 34689, start_serving=False)
 
     records = {
@@ -410,7 +476,11 @@ async def main():
 
     await mdns.unregsiter_all_services()
     print("MDNS Unregistered -- free to Ctrl+C Spam")
+    shutdown_event.set()
+    print("Broadcasted Shutdown event")
+    await asyncio.sleep(1)
     server.close()
+
     await server.wait_closed()
     print("Server Stopped")
 

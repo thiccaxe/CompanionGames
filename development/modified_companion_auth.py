@@ -196,7 +196,7 @@ class CompanionServerAuth(ABC):
         print(out[TlvValue.Identifier], paired)
         if TlvValue.Identifier not in out or out[TlvValue.Identifier] not in paired:
             print("device has not been paired, giving up.")
-            tlv[TlvValue.Error] = "\x02"
+            tlv[TlvValue.Error] = b"\x02"
             self.send_to_client(
                 FrameType.PV_Next, {"_pd": write_tlv(tlv)}
             )
