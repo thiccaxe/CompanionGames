@@ -28,23 +28,24 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
     def connection_made(self, transport):
         self.peername = transport.get_extra_info('peername')
-        print('Connection from {}'.format(self.peername))
+        logging.debug('Connection from {}'.format(self.peername))
         self._transport = transport
         self._loop.create_task(self.on_shutdown())
 
     async def on_shutdown(self):
-        print("awaiting shutdown - ", self._data.shutdown_event.is_set())
+        logging.debug("awaiting shutdown")
         await asyncio.wait([
             self._loop.create_task(self._data.shutdown_event.wait()),
             self._loop.create_task(self._connection_closed_event.wait()),
         ], return_when=asyncio.FIRST_COMPLETED)
         if self._transport:
-            self.connection_lost(None)
-            print("shutting down transport")
+            if not self._connection_closed_event.is_set():
+                self.connection_lost(None)
+            logging.debug("shutting down transport")
             self._transport.close()
 
     def connection_lost(self, error):
-        print('Connection lost from {}'.format(self.peername))
+        logging.debug('Connection lost from {}'.format(self.peername))
         self._connection_closed_event.set()
 
     async def _process_buffer(self):
@@ -55,9 +56,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
                 # copy buffer
                 data: bytearray = self._buffer.copy()
                 self._buffer.clear()
-                print("state of buffer", self._buffer)
+                logging.debug(f"state of buffer {self._buffer}", )
                 self._buffer_write_event.clear()
-                print("Handling ", binascii.hexlify(data))
+                logging.debug("Handling {}".format(binascii.hexlify(data)))
                 data_len = len(data)
                 offset = 0
                 while (data_len - offset) >= 4:  # Minimums size: 1 byte frame type + 3 byte length
@@ -65,26 +66,26 @@ class CompanionConnectionProtocol(asyncio.Protocol):
                     _id = int.from_bytes(randbytes(3), "big")
                     # byte 1 to byte 4 is length; add 4 bytes for header.
                     payload_length = 4 + int.from_bytes(data[(offset + 1):(offset + 4)], byteorder="big")
-                    print(f"{offset=} / {data_len=} / {payload_length=}")
+                    logging.debug(f"{offset=} / {data_len=} / {payload_length=}")
                     if payload_length > (data_len - offset):
-                        print(_id, "break, data too small")
+                        logging.debug(_id, "break, data too small")
                         break
                     # frame type is the first byte
                     frame_type = FrameType(data[0])
-                    print(f"{frame_type=}")
+                    logging.debug(f"{frame_type=}")
                     # frame data doesn't include packet type, just length and the data
                     frame_data = data[(offset + 4):(offset + payload_length)]
                     offset += payload_length
-                    print(_id, offset)
+                    logging.debug(f"{_id=}, {offset=}")
                     if offset == data_len:
                         break
-                    print(_id, "finished handling data.")
+                    logging.debug(f"{_id=}, finished handling data.")
                 # at this point, copy the unread data in the copied buffer to the start of our buffer.
                 self._buffer[0:0] = data[offset:]
             except asyncio.CancelledError:
                 break
 
-        print("done processing buffer; connection over")
+        logging.debug("done processing buffer; connection over")
 
     def data_received(self, data):
         self._buffer += data
@@ -109,7 +110,7 @@ class CompanionServer:
                 loop=self._loop,
             )
         except Exception:
-            print("failed to start proxy")
+            logging.warning("failed to start proxy")
             raise
         return proxy
 
@@ -120,7 +121,7 @@ class CompanionServer:
                 self._protocol_factory,
                 '0.0.0.0', int(self._config["server"]["companion_port"]), start_serving=False)
             logging.debug("Created server")
-        except Exception as e:
+        except asyncio.CancelledError as e:
             logging.exception("e")
         return await self._server.start_serving()
 
