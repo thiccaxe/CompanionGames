@@ -5,7 +5,7 @@ from rich.logging import RichHandler
 from rich.traceback import install
 
 # ignore errors from these libs
-import tomlkit
+import tomlkit, websockets
 
 console = Console()
 
@@ -20,7 +20,7 @@ def setup_logging():
         level=os.environ.get("LOGLEVEL", "INFO"),
         console=console,
         rich_tracebacks=True,
-        tracebacks_suppress=[tomlkit]
+        tracebacks_suppress=[tomlkit, websockets]
     )
 
     logging.basicConfig(

@@ -38,8 +38,10 @@ class Config:
             Required('server'): {
                 Required('private_key'): All(str, Length(64), self.key_validator),
                 Required('websocket_secret'): All(str, Length(min=32, max=256)),
+                Required('dpid_salt'): All(str, Length(64), self.key_validator),
             },
-            Required('clients'): Any(None, dict)
+            Required('clients'): Any(None, dict),
+            Required('pairings'): Any(None, dict),
         })
 
     @staticmethod
