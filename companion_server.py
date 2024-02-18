@@ -615,6 +615,18 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         if device_pairing is None:
             logging.debug(f"{self._peername} device has not been paired, giving up.")
+            tlv = write_tlv({
+                TlvValue.SeqNo: b"\x04",
+                TlvValue.Error: b"\x02",
+            })
+            data = opack.pack({
+                "_pd": tlv
+            })
+            payload_length = len(data)
+            header = bytes([FrameType.PV_Next.value]) + payload_length.to_bytes(3, byteorder="big")
+
+            self._transport.write(header + data)
+
             self._auth_session = None
             return  # TODO error
 
