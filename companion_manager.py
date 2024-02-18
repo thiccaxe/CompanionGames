@@ -17,20 +17,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import asyncio
-import dataclasses
+
+from server_data import ServerData
+
+"""
+All the shit goes down here
+"""
 
 
-@dataclasses.dataclass
-class TypingSession:
-    tsid: str
-    meta: dict
-    hdpid: str  # hashed device pairing id
+class CompanionManager:
+    _websocket_server: object
+    _companion_server: object
 
+    def __init__(self, config, secrets, loop: asyncio.AbstractEventLoop, data: ServerData):
+        self._config = config
+        self._secrets = secrets
+        self._loop = loop
+        self._data = data
 
-class ServerData:
+    def set_websocket_server(self, websocket_server): self._websocket_server = websocket_server
 
-    def __init__(self):
-        self.connected_clients: dict[str, asyncio.Protocol] = dict()
-        self.typing_sessions: dict[str, TypingSession] = dict()
-
-        self.shutdown_event = asyncio.Event()
+    def set_companion_server(self, companion_server): self._companion_server = companion_server

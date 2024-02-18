@@ -1,6 +1,6 @@
 # Pair setup procedure
 
-When there could be multiple possible pins used for pairing
+When there could be multiple possible pins used for pairing - nevermind, this is false
 
 ## M1
 
