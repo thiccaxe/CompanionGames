@@ -163,6 +163,7 @@ class CompanionAuthSetupSession:
     device_x: Optional[bytes]
     server_x: Optional[bytes]
     session_chacha: Optional[Chacha20Cipher]
+    encryption_chacha: Optional[Chacha20Cipher]
     hdpid: Optional[bytes]
     device_lt_public_key: Optional[Ed25519PublicKey]
     server_lt_private_key: Optional[Ed25519PrivateKey]
@@ -201,6 +202,7 @@ class CompanionAuthSetupSession:
             device_x=None,
             server_x=None,
             session_chacha=None,
+            encryption_chacha=None,
             hdpid=None,
             device_lt_public_key=None,
             server_lt_private_key=server_lt_private_key,
@@ -223,7 +225,12 @@ class CompanionAuthSetupSession:
             "Pair-Setup-Encrypt-Info",
             binascii.unhexlify(self.srp_session.key),
         )
+
         self.session_chacha = Chacha20Cipher(session_key, session_key)
+        self.encryption_chacha = Chacha20Cipher(
+            hkdf_expand("", "ServerEncrypt-main", binascii.unhexlify(self.srp_session.key)),
+            hkdf_expand("", "ClientEncrypt-main", binascii.unhexlify(self.srp_session.key)),
+        )
 
     def encrypt(self, data, nonce):
         if self.session_chacha is None:
@@ -246,6 +253,12 @@ class CompanionAuthSetupSession:
     def create_m5_signature(self):
         server_info = self.server_x + self.apid + self.server_lt_public_key.public_bytes_raw()
         return self.server_lt_private_key.sign(server_info)
+
+    def convert(self):
+        return CompanionAuthEncryptedSession(
+            binascii.hexlify(self.hdpid).decode("utf-8"),
+            self.encryption_chacha,
+        )
 
 
 class CompanionConnectionProtocol(asyncio.Protocol):
@@ -499,9 +512,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         self._save_pairing()
 
-        self._auth_session = None
-
-        self._transport.close()
+        self._auth_session = self._auth_session.convert()
 
     def _verify_psid_is_valid(self, psid):
         pairings = self._secrets["pairings"]
