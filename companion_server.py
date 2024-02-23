@@ -146,9 +146,13 @@ class CompanionAuthEncryptedSession:
     hdpid: str
     chacha: Chacha20Cipher  # chacha based on keys derived from shared_key
 
-    def decrypt(self, frame_type, frame_data):
+    def decrypt(self, frame_type, frame_data) -> bytes:
         header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
         return self.chacha.decrypt(bytes(frame_data), aad=header)
+
+    def encrypt(self, frame_type: FrameType, frame_data: bytes) -> bytes:
+        header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
+        return self.chacha.encrypt(frame_data, aad=header)
 
 
 @dataclasses.dataclass
@@ -383,6 +387,21 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         except Exception as e:
             logging.exception(e)
 
+    async def _send_frame(self, frame_type: FrameType, frame_data: bytes):
+        if self._transport is None:
+            logging.warning(f"{self._peername} Tried to send frame with no connection {frame_type=} {frame_data=}")
+        if self._auth_session is None:
+            logging.warning(f"{self._peername} Tried to send frame with no active session {frame_type=} {frame_data=}")
+            return
+
+        if isinstance(self._auth_session, CompanionAuthEncryptedSession):
+            frame_data = self._auth_session.encrypt(frame_type, frame_data)
+            # decrypt data
+
+        header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
+
+        self._transport.write(header + frame_data)
+
     async def _process_setup_m1(self, pairing_data):
         if self._auth_session is not None:
             self._auth_session = None
@@ -404,10 +423,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         data = opack.pack({
             "_pd": tlv
         })
-        payload_length = len(data)
-        header = bytes([FrameType.PS_Next.value]) + payload_length.to_bytes(3, byteorder="big")
 
-        self._transport.write(header + data)
+        await self._send_frame(FrameType.PS_Next, data)
 
     async def _process_setup_m3(self, pairing_data):
         if (self._auth_session is None) or (not isinstance(self._auth_session, CompanionAuthSetupSession)):
@@ -437,10 +454,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         data = opack.pack({
             "_pd": write_tlv(tlv)
         })
-        payload_length = len(data)
-        header = bytes([FrameType.PS_Next.value]) + payload_length.to_bytes(3, byteorder="big")
 
-        self._transport.write(header + data)
+        await self._send_frame(FrameType.PS_Next, data)
 
     async def _process_setup_m5(self, pairing_data):
         if self._auth_session is None or not isinstance(self._auth_session, CompanionAuthSetupSession):
@@ -505,10 +520,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         data = opack.pack({
             "_pd": write_tlv(tlv)
         })
-        payload_length = len(data)
-        header = bytes([FrameType.PS_Next.value]) + payload_length.to_bytes(3, byteorder="big")
 
-        self._transport.write(header + data)
+        await self._send_frame(FrameType.PS_Next, data)
 
         self._save_pairing()
 
@@ -539,6 +552,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         self._secrets["clients"][hdpid] = pairing
 
     async def _process_verify_m1(self, pairing_data):
+        # delete old auth session, if it exists
+        self._auth_session = None
         # Check if pairing data is valid
         if TlvValue.PublicKey not in pairing_data:
             logging.error(f"{self._peername} bad verify m1 frame, no client public key")
@@ -582,10 +597,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         data = opack.pack({
             "_pd": tlv
         })
-        payload_length = len(data)
-        header = bytes([FrameType.PV_Next.value]) + payload_length.to_bytes(3, byteorder="big")
 
-        self._transport.write(header + data)
+        await self._send_frame(FrameType.PV_Next, data)
 
     async def _process_verify_m3(self, pairing_data):
         if (self._auth_session is None) or (not isinstance(self._auth_session, CompanionAuthVerifySession)):
@@ -633,10 +646,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             data = opack.pack({
                 "_pd": tlv
             })
-            payload_length = len(data)
-            header = bytes([FrameType.PV_Next.value]) + payload_length.to_bytes(3, byteorder="big")
-
-            self._transport.write(header + data)
+            await self._send_frame(FrameType.PV_Next, data)
 
             self._auth_session = None
             return  # TODO error
@@ -653,10 +663,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         data = opack.pack({
             "_pd": tlv
         })
-        payload_length = len(data)
-        header = bytes([FrameType.PV_Next.value]) + payload_length.to_bytes(3, byteorder="big")
-
-        self._transport.write(header + data)
+        await self._send_frame(FrameType.PV_Next, data)
 
         self._auth_session = self._auth_session.convert()
 
