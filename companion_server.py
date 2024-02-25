@@ -361,8 +361,15 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             unencrypted_frame_data = self._auth_session.decrypt(frame_type, frame_data)
             frame: dict = opack.unpack(unencrypted_frame_data)[0]
             logging.debug(f"{self._peername} {frame=}")
+
         except Exception as e:
             logging.exception(e)
+            logging.warning("Could not handle frame")
+            return
+
+        # extract frame type
+        if "_i" not in frame:
+            pass
 
     async def _handle_auth_frame(self, frame_type, frame_data):
         logging.debug(f"{self._peername} handling auth frame")
@@ -386,6 +393,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.error(f"{self._peername} could not parse auth frame (no handler)")
         except Exception as e:
             logging.exception(e)
+
+    async def _send_opack(self, frame_type: FrameType, obj: object) -> None:
+        await self._send_frame(frame_type, opack.pack(obj))
 
     async def _send_frame(self, frame_type: FrameType, frame_data: bytes):
         if self._transport is None:
@@ -531,7 +541,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         pairings = self._secrets["pairings"]
         for _psid in pairings:
             if _psid == psid:
-                return bool(pairings[_psid]["active"])
+                return bool(pairings[_psid]["allow_pairing"])
 
         return False
 
@@ -551,13 +561,24 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         logging.debug(f"{self._peername} {pairing=}")
         self._secrets["clients"][hdpid] = pairing
 
+    async def _verify_flow_authentication_error(self, discard_session: bool = True, error_code: bytes = b"\x02"):
+        await self._send_opack(FrameType.PV_Next, {
+            "_pd": write_tlv({
+                TlvValue.SeqNo: b"\x04",
+                TlvValue.Error: error_code,
+            })
+        })
+        if discard_session:
+            self._auth_session = None
+
     async def _process_verify_m1(self, pairing_data):
         # delete old auth session, if it exists
         self._auth_session = None
         # Check if pairing data is valid
         if TlvValue.PublicKey not in pairing_data:
             logging.error(f"{self._peername} bad verify m1 frame, no client public key")
-            return  # respond properly later
+            await self._verify_flow_authentication_error(discard_session=False)  # already done
+            return
         client_public_key_bytes = pairing_data[TlvValue.PublicKey]
         self._auth_session = None
         self._auth_session = CompanionAuthVerifySession.create(
@@ -571,8 +592,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         except cryptography.exceptions.InvalidKey as e:
             logging.exception(e)
             logging.error(f"{self._peername} could not generate shared key")
-            self._auth_session = None
-            return  # respond properly later
+            await self._verify_flow_authentication_error()
+            return
 
         try:
             signature = self._auth_session.create_m1_signature()
@@ -584,8 +605,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         except Exception as e:
             logging.exception(e)
             logging.error(f"{self._peername} could not generate device info signature")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
         tlv = write_tlv(
             {
@@ -602,13 +623,14 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
     async def _process_verify_m3(self, pairing_data):
         if (self._auth_session is None) or (not isinstance(self._auth_session, CompanionAuthVerifySession)):
-            logging.error("no auth session")
-            return  # TODO error
+            logging.error(f"no auth session; auth session type {type(self._auth_session)}")
+            await self._verify_flow_authentication_error()
+            return
 
         if TlvValue.EncryptedData not in pairing_data:
             logging.error(f"{self._peername} bad verify m3 frame, no encrypted data")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
         try:
             decrypted_tlv_bytes = self._auth_session.decrypt(bytes(pairing_data[TlvValue.EncryptedData]),
@@ -616,63 +638,90 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         except Exception as e:
             logging.exception(e)
             logging.debug(f"{self._peername} Invalid M3 encrypted tlv")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
         decrypted_tlv = read_tlv(decrypted_tlv_bytes)
         logging.debug(f"{self._peername} decrypted tlv: {decrypted_tlv}")
 
         if TlvValue.Identifier not in decrypted_tlv:
             logging.debug(f"{self._peername} no identifier in m3 decrypted tlv")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
         if TlvValue.Signature not in decrypted_tlv:
             logging.debug(f"{self._peername} no signature in m3 decrypted tlv")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
         hdpid = self.compute_hdpid(decrypted_tlv[TlvValue.Identifier])
-        device_pairing = self.get_device_pairing(hdpid)
+        device_pairing = self._get_device_pairing(hdpid)
 
         logging.debug(f"{self._peername} potentially using {device_pairing=}")
 
         if device_pairing is None:
             logging.debug(f"{self._peername} device has not been paired, giving up.")
-            tlv = write_tlv({
-                TlvValue.SeqNo: b"\x04",
-                TlvValue.Error: b"\x02",
-            })
-            data = opack.pack({
-                "_pd": tlv
-            })
-            await self._send_frame(FrameType.PV_Next, data)
+            await self._verify_flow_authentication_error()
+            return
 
-            self._auth_session = None
-            return  # TODO error
+        if not self._client_pairing_session_exists(device_pairing):
+            logging.debug(f"{self._peername} bad pairing session, giving up.")
+            await self._verify_flow_authentication_error()
+            return
+
+        if not self._client_pairing_session_can_connect(device_pairing):
+            logging.debug(f"{self._peername} client cannot connect with given pairing session.")
+            self._connection_closed_event.set() # not sure if best solution
+            return
 
         logging.debug(f"{self._peername} session key {binascii.hexlify(self._auth_session.session_key)}")
 
         if not self._auth_session.verify_m3_signature(decrypted_tlv[TlvValue.Identifier], device_pairing,
                                                       decrypted_tlv[TlvValue.Signature]):
             logging.debug(f"{self._peername} bad device signature")
-            self._auth_session = None
-            return  # TODO error
+            await self._verify_flow_authentication_error()
+            return
 
-        tlv = write_tlv({TlvValue.SeqNo: b"\x04"})
-        data = opack.pack({
-            "_pd": tlv
+        await self._send_opack(FrameType.PV_Next, {
+            "_pd": write_tlv({
+                TlvValue.SeqNo: b"\x04",
+            }),
         })
-        await self._send_frame(FrameType.PV_Next, data)
 
         self._auth_session = self._auth_session.convert()
 
-    def get_device_pairing(self, hdpid: bytes) -> Optional[dict]:
+    def _get_device_pairing(self, hdpid: bytes) -> Optional[dict]:
         hdpid_str = binascii.hexlify(hdpid).decode('utf-8')
         if hdpid_str in self._secrets["clients"]:
             return self._secrets["clients"][hdpid_str]
 
         return None
+
+    def _client_pairing_session_exists(self, device_pairing: dict) -> bool:
+        if "psid" not in device_pairing:
+            logging.debug(f"No psid in device pairing")
+            return False
+
+        psid = device_pairing["psid"]
+
+        if psid not in self._secrets["pairings"]:
+            logging.debug(f"{psid=} does not exist")
+            return False
+
+        return True
+
+    def _client_pairing_session_can_connect(self, device_pairing: dict) -> bool:
+        """
+        precondition: psid exists in db
+        """
+        psid = device_pairing["psid"]
+        pairing = self._secrets["pairings"][psid]
+
+        if "allow_connections" not in pairing:
+            logging.warning(f"pairing {psid=} is malformed")
+            return False
+
+        return bool(pairing["allow_connections"])
 
     def connection_lost(self, error):
         logging.debug(f"{self._peername} connection lost")
