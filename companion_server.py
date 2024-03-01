@@ -20,6 +20,7 @@ import asyncio
 import binascii
 import dataclasses
 import hashlib
+import inspect
 import logging
 import secrets
 from asyncio import Server
@@ -266,6 +267,79 @@ class CompanionAuthSetupSession:
         )
 
 
+class CompanionSession:
+
+    async def handle_frame(self, frame: dict) -> Optional[dict]:
+        return None
+
+
+class CompanionDummySession(CompanionSession):
+    def __init__(self, config, secrets):
+        super(CompanionDummySession, self).__init__()
+        self._config = config
+        self._secrets = secrets
+        self._packet_handlers = {
+            "_systemInfo": self._handle_system_info_packet,
+            # "_sessionStart": self._handle_session_start_packet,
+            # "_sessionStop": self._handle_session_stop_packet,
+            # "FetchAttentionState": self._handle_fetch_attention_state,
+            # "FetchSiriRemoteInfo": self._handle_fetch_siri_remote_info,
+            # "_mcc": self._handle_mcc,
+            # "_touchStart": self._handle_touch_start,
+            # "_touchStop": self._handle_touch_stop,
+            # "_hidT": self._handle_hid_touchpad,
+            # "_hidC": self._handle_click,
+        }
+
+    async def handle_frame(self, frame):
+        response: dict = None
+        packet_nonce = 0
+        if "_x" in frame:
+            packet_nonce = frame["_x"]
+
+        if "_i" in frame:
+            packet_type = frame["_i"]
+            if packet_type in self._packet_handlers:
+                packet_handler = self._packet_handlers[packet_type]
+                if inspect.iscoroutinefunction(packet_handler):
+                    response = await packet_handler(frame)
+                else:
+                    response = packet_handler(frame)
+
+        response = response if response else {}
+        response.setdefault("_x", packet_nonce)
+        response.setdefault("_t", 3)
+        response.setdefault("_c", {})
+
+
+
+        return response
+
+    def _handle_system_info_packet(self, frame):
+        response = {
+            "_c": {
+                "_pubID": self._config["server"]["mac"],
+                "_mRtID": self._config["server"]["id"],
+                "_mrID": self._config["server"]["id"],
+                "_dCapF": 1,
+                "_bf": 1920,
+                "_lP": int(self._config["server"]["companion_port"]),
+                "_i": "de179cfc3a9e",
+                "_clFl": 128,
+                "model": "AppleTV5,3",
+                'name': self._config["server"]["name"],
+                '_dC': 'unknown', '_cf': 512, '_sf': 65536,
+                '_stA': ['com.apple.callservicesd.CompanionLinkManager', 'com.apple.bluetooth.remote',
+                         'com.apple.workflow.remotewidgets', 'com.apple.coreduet.sync',
+                         'com.apple.devicediscoveryui.rapportwake', 'com.apple.biomesyncd.rapport',
+                         'com.apple.SeymourSession', 'com.apple.LiveAudio', 'com.apple.tvremoteservices',
+                         'com.apple.wifivelocityd.rapportWake', 'com.apple.siri.wakeup', 'com.apple.siri.wakeup',
+                         'com.apple.Seymour', 'com.apple.home.messaging'],
+            }
+        }
+
+        return response
+
 class CompanionConnectionProtocol(asyncio.Protocol):
     _peername: Tuple[bytes, int] = None
 
@@ -279,11 +353,12 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         self._buffer_write_event = asyncio.Event()
         self._buffer_read_task: Optional[asyncio.Future] = None
         self._connection_closed_event = asyncio.Event()
-        self._auth_session = Optional[Union[
+        self._auth_session: Optional[Union[
             CompanionAuthVerifySession,
             CompanionAuthSetupSession,
             CompanionAuthEncryptedSession
-        ]]
+        ]] = None
+        self._session: Optional[CompanionSession] = None
         self._auth_handlers = {
             "setup_M1": self._process_setup_m1,
             "setup_M3": self._process_setup_m3,
@@ -350,7 +425,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
     async def _handle_play_frame(self, frame_type, frame_data):
         logging.debug(f"{self._peername} handling play frame")
-        if self._auth_session is None or not isinstance(self._auth_session, CompanionAuthEncryptedSession):
+        if self._session is None or self._auth_session is None or not isinstance(self._auth_session,
+                                                                                 CompanionAuthEncryptedSession):
             logging.debug(f"{self._peername} not ready for this packet")
             return
 
@@ -368,9 +444,10 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.warning("Could not handle frame")
             return
 
-        # extract frame type
-        if "_i" not in frame:
-            pass
+        # pawn it off to session handler
+        response_frame = await self._session.handle_frame(frame)
+        if response_frame is not None:
+            await self._send_opack(frame_type, response_frame)
 
     async def _handle_auth_frame(self, frame_type, frame_data):
         logging.debug(f"{self._peername} handling auth frame")
@@ -537,6 +614,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         self._save_pairing()
 
         self._auth_session = self._auth_session.convert()
+        self._session = CompanionDummySession(self._config, self._secrets)
 
     def _verify_psid_is_valid(self, psid):
         pairings = self._secrets["pairings"]
@@ -690,6 +768,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         })
 
         self._auth_session = self._auth_session.convert()
+        self._session = CompanionDummySession(self._config, self._secrets)
 
     def _get_device_pairing(self, hdpid: bytes) -> Optional[dict]:
         hdpid_str = binascii.hexlify(hdpid).decode('utf-8')
