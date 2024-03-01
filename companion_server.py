@@ -151,7 +151,8 @@ class CompanionAuthEncryptedSession:
         return self.chacha.decrypt(bytes(frame_data), aad=header)
 
     def encrypt(self, frame_type: FrameType, frame_data: bytes) -> bytes:
-        header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
+        header = bytes([frame_type.value]) + (len(frame_data) + 16).to_bytes(3, byteorder="big")
+        # add 16 for "auth tag"
         return self.chacha.encrypt(frame_data, aad=header)
 
 
