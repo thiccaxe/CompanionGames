@@ -18,6 +18,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
 import dataclasses
+from typing import Optional
+
+import websockets
 
 
 @dataclasses.dataclass
@@ -31,6 +34,7 @@ class ServerData:
 
     def __init__(self):
         self.connected_clients: dict[str, asyncio.Protocol] = dict()
+        self.connected_website: Optional[websockets.WebSocketClientProtocol] = None
         self.typing_sessions: dict[str, TypingSession] = dict()
 
         self.shutdown_event = asyncio.Event()

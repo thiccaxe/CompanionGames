@@ -32,14 +32,23 @@ class WebsocketServer:
         self._secrets = secrets
         self._loop = loop
         self._data = data
-        self._websocket_server = websockets.serve(self.handler, "", int(self._config["server"]["websocket_port"]), loop=self._loop)
+        self._websocket_server = websockets.serve(self.handler, "", int(self._config["server"]["websocket_port"]),
+                                                  loop=self._loop)
         self._manager = manager
         self._manager.set_websocket_server(self)
 
     async def handler(self, websocket: websockets.WebSocketClientProtocol):
-        while True:
-            message = await websocket.recv()
-            logging.debug(message)
+        await self._manager.website_connected(websocket)
+        try:
+            while True:
+                message = await websocket.recv()
+                logging.debug(message)
+                if isinstance(message, str):
+                    await self._manager.temp_send_text(message.strip())
+        except websockets.exceptions.ConnectionClosed:
+            logging.debug(f"Websocket connection closed")
+
+        await self._manager.website_disconnected()
 
     async def __aenter__(self):
         if self._websocket_server is not None:
@@ -50,4 +59,3 @@ class WebsocketServer:
         if self._websocket_server is not None:
             logging.debug(f"Stopping websocket server")
             return await self._websocket_server.__aexit__(exc_type, exc_val, exc_tb)
-

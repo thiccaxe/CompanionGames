@@ -23,6 +23,7 @@ import hashlib
 import inspect
 import logging
 import secrets
+import time
 from asyncio import Server
 
 import cryptography.exceptions
@@ -41,8 +42,9 @@ from pyatv.protocols.companion.protocol import (
     FrameType,
 )
 
+from companion_manager import CompanionManager
 from fruit.hkdf import hkdf_expand
-from server_data import ServerData
+from server_data import ServerData, TypingSession
 from fruit.chacha20 import Chacha20Cipher
 from fruit.hap_tlv8 import write_tlv, read_tlv, TlvValue, ErrorCode
 from fruit import opack
@@ -278,17 +280,20 @@ class CompanionDummySession(CompanionSession):
         super(CompanionDummySession, self).__init__()
         self._config = config
         self._secrets = secrets
+        self._companion_services = dict()
+        self._touch = None
         self._packet_handlers = {
             "_systemInfo": self._handle_system_info_packet,
-            # "_sessionStart": self._handle_session_start_packet,
-            # "_sessionStop": self._handle_session_stop_packet,
-            # "FetchAttentionState": self._handle_fetch_attention_state,
-            # "FetchSiriRemoteInfo": self._handle_fetch_siri_remote_info,
-            # "_mcc": self._handle_mcc,
-            # "_touchStart": self._handle_touch_start,
-            # "_touchStop": self._handle_touch_stop,
-            # "_hidT": self._handle_hid_touchpad,
-            # "_hidC": self._handle_click,
+            "_sessionStart": self._handle_session_start_packet,
+            "_sessionStop": self._handle_session_stop_packet,
+            "_interest": self._handle_interest_packet,
+            "FetchAttentionState": self._handle_fetch_attention_state,
+            "FetchSiriRemoteInfo": self._handle_fetch_siri_remote_info,
+            "_mcc": self._handle_mcc,
+            "_touchStart": self._handle_touch_start,
+            "_touchStop": self._handle_touch_stop,
+            "_hidT": self._handle_hid_touchpad,
+            "_hidC": self._handle_hid_click,
         }
 
     async def handle_frame(self, frame):
@@ -310,8 +315,6 @@ class CompanionDummySession(CompanionSession):
         response.setdefault("_x", packet_nonce)
         response.setdefault("_t", 3)
         response.setdefault("_c", {})
-
-
 
         return response
 
@@ -340,15 +343,117 @@ class CompanionDummySession(CompanionSession):
 
         return response
 
+    def _handle_session_start_packet(self, frame):
+        if "_c" not in frame:
+            logging.debug("No _c (content) in frame!")
+            return
+
+        frame_content = frame["_c"]
+        if '_srvT' not in frame_content:
+            logging.debug("No _srvT (service type) in frame!")
+            return
+
+        service_type = frame_content['_srvT']
+
+        if '_sid' not in frame_content:
+            logging.debug("No _sid (service id) in frame!")
+            return
+
+        service_id_client = frame_content['_sid']
+
+        service_id_server = int.from_bytes(randbytes(4), "big")
+
+        service_id = (service_id_client << 32) | service_id_server
+
+        self._companion_services[service_type] = {
+            "client_sid": service_id_client,
+            "server_sid": service_id_server,
+            "sid": service_id,
+            "init_time": time.time_ns()
+        }
+
+        return {
+            "_c": {
+                "_sid": service_id_server
+            }
+        }
+
+    def _handle_session_stop_packet(self, frame):
+        pass  # ignore
+
+    def _handle_interest_packet(self, frame):
+        pass  # ignore
+
+    def _handle_fetch_attention_state(self, frame):
+        return {
+            "_c": {
+                "state": 0x03  # Awake
+            }
+        }
+
+    def _handle_fetch_siri_remote_info(self, frame):
+        return {
+            '_c': {
+                'SiriRemoteInfoKey': b'bplist'
+            }
+        }
+
+    def _handle_mcc(self, frame):
+        return {
+            "_c": {
+                '_mcs': 2
+            }
+        }
+
+    def _handle_touch_start(self, frame):
+        try:
+            width = frame["_c"]["_width"]
+            height = frame["_c"]["_height"]
+            self._touch = {
+                'start': time.time_ns(),
+                'pad': {
+                    "width": width,
+                    "height": height,
+                }
+            }
+        except KeyError:
+            pass
+        return {
+            "_c": {
+                "_i": 1
+            }
+        }
+
+    def _handle_touch_stop(self, frame):
+        self._touch = None
+        pass
+
+    def _handle_hid_touchpad(self, frame):
+        if self._touch is None:
+            return
+
+        if "_c" not in frame:
+            return
+
+        frame_content = frame["_c"]
+
+        logging.debug(
+            f"Touchpad: ({frame_content.get('_cx', '?')}, {frame_content.get('_cy', '?')})")
+
+    def _handle_hid_click(self, frame):
+        pass
+
+
 class CompanionConnectionProtocol(asyncio.Protocol):
     _peername: Tuple[bytes, int] = None
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, config, secrets, data: ServerData):
+    def __init__(self, loop: asyncio.AbstractEventLoop, config, _secrets, data: ServerData, manager: CompanionManager):
         self._transport: Optional[asyncio.Transport] = None
         self._loop = loop
         self._config = config
-        self._secrets = secrets
+        self._secrets = _secrets
         self._data = data
+        self._manager = manager
         self._buffer = bytearray()
         self._buffer_write_event = asyncio.Event()
         self._buffer_read_task: Optional[asyncio.Future] = None
@@ -473,6 +578,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.exception(e)
 
     async def _send_opack(self, frame_type: FrameType, obj: object) -> None:
+        logging.debug(f"{self._peername} Sending opack: {obj}")
         await self._send_frame(frame_type, opack.pack(obj))
 
     async def _send_frame(self, frame_type: FrameType, frame_data: bytes):
@@ -482,12 +588,16 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.warning(f"{self._peername} Tried to send frame with no active session {frame_type=} {frame_data=}")
             return
 
+        logging.debug(f"{self._peername} Sending with {frame_type=}")
+        logging.debug(f"{self._peername} Sending data: {binascii.hexlify(frame_data)}")
+
         if isinstance(self._auth_session, CompanionAuthEncryptedSession):
             frame_data = self._auth_session.encrypt(frame_type, frame_data)
-            # decrypt data
+            logging.debug(f"{self._peername} Sending encrypted data: {binascii.hexlify(frame_data)}")
 
         header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
 
+        logging.debug(f"{self._peername} Sending header: {binascii.hexlify(header)}")
         self._transport.write(header + frame_data)
 
     async def _process_setup_m1(self, pairing_data):
@@ -611,10 +721,11 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         await self._send_frame(FrameType.PS_Next, data)
 
-        self._save_pairing()
+        await self._save_pairing()
 
         self._auth_session = self._auth_session.convert()
         self._session = CompanionDummySession(self._config, self._secrets)
+        await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
     def _verify_psid_is_valid(self, psid):
         pairings = self._secrets["pairings"]
@@ -630,7 +741,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         _hash.update(binascii.unhexlify(self._secrets["server"]["dpid_salt"]))
         return _hash.digest()
 
-    def _save_pairing(self):
+    async def _save_pairing(self):
         pairing = tomlkit.table()
         hdpid = binascii.hexlify(self._auth_session.hdpid).decode("utf-8")
         ltpk = binascii.hexlify(self._auth_session.device_lt_public_key.public_bytes_raw()).decode("utf-8")
@@ -638,7 +749,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         pairing.add("psid", self._auth_session.psid)
         pairing.add("ltpk", ltpk)
         logging.debug(f"{self._peername} {pairing=}")
-        self._secrets["clients"][hdpid] = pairing
+        await self._manager.companion_device_paired(hdpid, pairing)
 
     async def _verify_flow_authentication_error(self, discard_session: bool = True, error_code: bytes = b"\x02"):
         await self._send_opack(FrameType.PV_Next, {
@@ -750,7 +861,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         if not self._client_pairing_session_can_connect(device_pairing):
             logging.debug(f"{self._peername} client cannot connect with given pairing session.")
-            self._connection_closed_event.set() # not sure if best solution
+            self._connection_closed_event.set()  # not sure if best solution
             return
 
         logging.debug(f"{self._peername} session key {binascii.hexlify(self._auth_session.session_key)}")
@@ -769,6 +880,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         self._auth_session = self._auth_session.convert()
         self._session = CompanionDummySession(self._config, self._secrets)
+
+        await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
     def _get_device_pairing(self, hdpid: bytes) -> Optional[dict]:
         hdpid_str = binascii.hexlify(hdpid).decode('utf-8')
@@ -803,6 +916,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         return bool(pairing["allow_connections"])
 
+    def open_typing_session(self, typing_session: TypingSession):
+        pass # send ti start packet.
+
     def connection_lost(self, error):
         logging.debug(f"{self._peername} connection lost")
         self._connection_closed_event.set()
@@ -817,18 +933,23 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             self._buffer_read_task.cancel()
             if not self._connection_closed_event.is_set():
                 self.connection_lost(None)
+
+            if isinstance(self._auth_session, CompanionAuthEncryptedSession): # in other words, connected
+                await self._manager.companion_device_disconnected(self._auth_session.hdpid)
+
             logging.debug(f"{self._peername} shutting down transport")
             self._transport.close()
             logging.debug(f"{self._peername} connection cleaned up")
 
+        del self._auth_session  # in case?
         del self._buffer  # in case?
 
 
 class CompanionServer:
-    def __init__(self, config, secrets, loop: asyncio.AbstractEventLoop, data, manager):
+    def __init__(self, config, _secrets, loop: asyncio.AbstractEventLoop, data, manager: CompanionManager):
         self._loop = loop
         self._config = config
-        self._secrets = secrets
+        self._secrets = _secrets
         self._data = data
         self._server: Optional[Union[List[Server], Server]] = None
         self._manager = manager
@@ -836,7 +957,7 @@ class CompanionServer:
 
     def _protocol_factory(self):
         proto = CompanionConnectionProtocol(
-            self._loop, self._config, self._secrets, self._data
+            self._loop, self._config, self._secrets, self._data, self._manager
         )
         return proto
 
