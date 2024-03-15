@@ -606,9 +606,15 @@ class CompanionConnectionProtocol(asyncio.Protocol):
     async def _process_setup_m1(self, pairing_data):
         if self._auth_session is not None:
             self._auth_session = None
+
+        current_pairing_session: dict = self._manager.get_current_pairing_session()
+        if current_pairing_session is None:
+            logging.debug("Client attempted pairing when no session allowed it")
+            return
+
         self._auth_session = CompanionAuthSetupSession.create(
             self._config["server"]["id"].encode(),
-            "002c38c4-d08d-4c99-908e-98bfc2921531",
+            current_pairing_session["psid"],
             "1234",
             binascii.unhexlify(self._secrets["server"]["private_key"]),
         )
@@ -922,6 +928,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
     def close_transport(self):
         self._transport.close()
+
     async def open_typing_session(self, typing_session: TypingSession):
         resp_plist = plistlib.dumps({
             '$version': 100000,
@@ -933,15 +940,19 @@ class CompanionConnectionProtocol(asyncio.Protocol):
                 {'$class': UID(3)},
                 {'$classname': 'TIDocumentState', '$classes': ['TIDocumentState', 'NSObject']},
                 {'$classname': 'RTIDocumentState', '$classes': ['RTIDocumentState', 'NSObject']},
-                {'locApp': UID(8), 'a2bId': True, 'bId': UID(7), 'tiTraits': UID(9), '$class': UID(37), 'ctxId': -2115096753, 'cfmType': 87, 'layerId': -8115573056752366405, 'traitsMask': 576, 'userInfo': UID(11), 'aId': UID(6)},
+                {'locApp': UID(8), 'a2bId': True, 'bId': UID(7), 'tiTraits': UID(9), '$class': UID(37),
+                 'ctxId': -2115096753, 'cfmType': 87, 'layerId': -8115573056752366405, 'traitsMask': 576,
+                 'userInfo': UID(11), 'aId': UID(6)},
                 '',
                 'com.apple.TVWatchList',
                 'TV',
                 {'flags': 1417693830, 'auxFlags': 1, '$class': UID(10), 'version': 2},
                 {'$classname': 'TITextInputTraits', '$classes': ['TITextInputTraits', 'NSObject']},
                 {
-                    'NS.keys': [UID(12), UID(13), UID(14), UID(15), UID(16), UID(17), UID(18), UID(19), UID(20), UID(21), UID(22), UID(23), UID(24), UID(25), UID(26), UID(27), UID(28), UID(29)],
-                    'NS.objects': [UID(30), UID(30), UID(31), UID(30), UID(30), UID(32), UID(30), UID(30), UID(30), UID(33), UID(30), UID(30), UID(30), UID(32), UID(32), UID(34), UID(32), UID(30)],
+                    'NS.keys': [UID(12), UID(13), UID(14), UID(15), UID(16), UID(17), UID(18), UID(19), UID(20),
+                                UID(21), UID(22), UID(23), UID(24), UID(25), UID(26), UID(27), UID(28), UID(29)],
+                    'NS.objects': [UID(30), UID(30), UID(31), UID(30), UID(30), UID(32), UID(30), UID(30), UID(30),
+                                   UID(33), UID(30), UID(30), UID(30), UID(32), UID(32), UID(34), UID(32), UID(30)],
                     '$class': UID(36)
                 },
                 'ShouldSuppressSoftwareKeyboard',
@@ -985,7 +996,6 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             }
         })
 
-
     def connection_lost(self, error):
         logging.debug(f"{self._peername} connection lost")
         self._connection_closed_event.set()
@@ -1001,7 +1011,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             if not self._connection_closed_event.is_set():
                 self.connection_lost(None)
 
-            if isinstance(self._auth_session, CompanionAuthEncryptedSession): # in other words, connected
+            if isinstance(self._auth_session, CompanionAuthEncryptedSession):  # in other words, connected
                 await self._manager.companion_device_disconnected(self._auth_session.hdpid)
 
             logging.debug(f"{self._peername} shutting down transport")

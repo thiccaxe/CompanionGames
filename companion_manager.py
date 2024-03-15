@@ -43,6 +43,25 @@ class CompanionManager:
         self._loop = loop
         self._data = data
 
+    def get_current_pairing_session(self):
+        pairings: dict = self._secrets["pairings"]
+        for psid, pairing_session in pairings.items():
+            if pairing_session["allow_pairing"] is True:
+                return pairing_session
+
+        return None
+
+    def pairing_session_set_allow_pairing(self, psid, allow_pairing: bool):
+        pairings: dict = self._secrets["pairings"]
+        if psid not in pairings:
+            logging.warning(f"Pairing session {psid=} does not exist")
+            return False
+        if allow_pairing is True: # need to disable all others
+            for pairing_session in pairings[psid].values():
+                pairing_session["allow_pairing"] = False
+        pairings[psid]["allow_pairing"] = allow_pairing
+        return True
+
     def set_websocket_server(self, websocket_server):
         self._websocket_server = websocket_server
 
@@ -75,7 +94,6 @@ class CompanionManager:
             "hdpid": hdpid,
         })
 
-
     async def companion_device_disconnected(self, hdpid):
         if hdpid in self._data.connected_clients:
             del self._data.connected_clients[hdpid]
@@ -83,8 +101,8 @@ class CompanionManager:
             logging.debug(f"Companion device ({hdpid=}) connected")
             # send to website
             await self.send_to_website({
-                    "event": "companion_games:event/device/disconnected",
-                    "hdpid": hdpid,
+                "event": "companion_games:event/device/disconnected",
+                "hdpid": hdpid,
             })
         else:
             logging.warning(f"Disconnected a client with {hdpid=} when it never was connected!")
@@ -111,7 +129,6 @@ class CompanionManager:
         packet.setdefault("id", random.randint(5_000_000, 2_000_000_000))
         await self._data.connected_website.send(json.dumps(packet))
 
-
     async def temp_send_text(self, text):
         logging.debug(f"Broadcasting text {text}")
         for hdpid in copy.copy(self._data.connected_clients):
@@ -134,6 +151,3 @@ class CompanionManager:
         typing_session.hdpid = hdpid
 
         await client.open_typing_session(typing_session)
-
-
-

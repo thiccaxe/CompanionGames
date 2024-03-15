@@ -97,6 +97,13 @@ class WebsocketServer:
                 "data": [hdpid for hdpid in self._data.connected_clients]
             })
             return
+        elif packet["event"] == "companion_games:event/device/list/paired":
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/device/list/paired",
+                "data": [hdpid for hdpid in self._secrets["clients"]]
+            })
+            return
         elif packet["event"] == "companion_games:event/device/action/disconnect":
             if not ("data" in packet and isinstance(packet["data"], str)):
                 await self._manager.send_to_website({
@@ -117,6 +124,44 @@ class WebsocketServer:
             await self._manager.send_to_website({
                 "id": packet["id"],
                 "event": "companion_games:event/successish/device/disconnected"
+            })
+            return
+        elif packet["event"] == "companion_games:event/pairing/sessions/active":
+            # get the currently used pairing session
+            pairing_session = self._manager.get_current_pairing_session()
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/pairing/sessions/active",
+                "data": pairing_session,
+            })
+            return
+        elif packet["event"] == "companion_games:event/pairing/sessions/list":
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/pairing/sessions/list",
+                "data": self._secrets["pairings"],
+            })
+            return
+        elif packet["event"] == "companion_games:event/pairing/sessions/allow_pairing/update":
+            if not ("data" in packet and isinstance(packet["data"], dict)):
+                await self._manager.send_to_website({
+                    "id": packet["id"],
+                    "event": "companion_games:event/error/malformed_request"
+                })
+                return
+            data = packet["data"]
+            if not ("psid" in data and "allow_pairing" in data):
+                await self._manager.send_to_website({
+                    "id": packet["id"],
+                    "event": "companion_games:event/error/malformed_request"
+                })
+                return
+            psid = data["psid"]
+            allow_pairing = data["allow_pairing"]
+            self._manager.pairing_session_set_allow_pairing(psid, allow_pairing)
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/successish/pairing/sessions/allow_pairing/updated",
             })
             return
 
