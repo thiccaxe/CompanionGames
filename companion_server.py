@@ -22,9 +22,12 @@ import dataclasses
 import hashlib
 import inspect
 import logging
+import plistlib
 import secrets
 import time
+import uuid
 from asyncio import Server
+from plistlib import UID
 
 import cryptography.exceptions
 import tomlkit
@@ -725,6 +728,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         self._auth_session = self._auth_session.convert()
         self._session = CompanionDummySession(self._config, self._secrets)
+        # technically connected
         await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
     def _verify_psid_is_valid(self, psid):
@@ -916,8 +920,71 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         return bool(pairing["allow_connections"])
 
-    def open_typing_session(self, typing_session: TypingSession):
-        pass # send ti start packet.
+    def close_transport(self):
+        self._transport.close()
+    async def open_typing_session(self, typing_session: TypingSession):
+        resp_plist = plistlib.dumps({
+            '$version': 100000,
+            '$archiver': 'NSKeyedArchiver',
+            '$top': {'documentTraits': UID(5), 'sessionUUID': UID(38), 'documentState': UID(1)},
+            '$objects': [
+                '$null',
+                {'docSt': UID(2), '$class': UID(4), 'originatedFromSource': False},
+                {'$class': UID(3)},
+                {'$classname': 'TIDocumentState', '$classes': ['TIDocumentState', 'NSObject']},
+                {'$classname': 'RTIDocumentState', '$classes': ['RTIDocumentState', 'NSObject']},
+                {'locApp': UID(8), 'a2bId': True, 'bId': UID(7), 'tiTraits': UID(9), '$class': UID(37), 'ctxId': -2115096753, 'cfmType': 87, 'layerId': -8115573056752366405, 'traitsMask': 576, 'userInfo': UID(11), 'aId': UID(6)},
+                '',
+                'com.apple.TVWatchList',
+                'TV',
+                {'flags': 1417693830, 'auxFlags': 1, '$class': UID(10), 'version': 2},
+                {'$classname': 'TITextInputTraits', '$classes': ['TITextInputTraits', 'NSObject']},
+                {
+                    'NS.keys': [UID(12), UID(13), UID(14), UID(15), UID(16), UID(17), UID(18), UID(19), UID(20), UID(21), UID(22), UID(23), UID(24), UID(25), UID(26), UID(27), UID(28), UID(29)],
+                    'NS.objects': [UID(30), UID(30), UID(31), UID(30), UID(30), UID(32), UID(30), UID(30), UID(30), UID(33), UID(30), UID(30), UID(30), UID(32), UID(32), UID(34), UID(32), UID(30)],
+                    '$class': UID(36)
+                },
+                'ShouldSuppressSoftwareKeyboard',
+                'ShouldSuppressSoftwareKeyboardForKeyboardCamera',
+                'RTIInputDelegateClassName',
+                'UseAutomaticEndpointing',
+                'ReturnKeyEnabled',
+                'ShouldUseDictationSearchFieldBehavior',
+                'SuppressSoftwareKeyboard',
+                'ForceFloatingKeyboard',
+                'HasCustomInputViewController',
+                'CorrectionLearningAllowed',
+                'SuppressAssistantBar',
+                'ForceDisableDictation',
+                'ForceEnableDictation',
+                'HasNextKeyResponder',
+                'InputViewHiddenCount',
+                'DisableBecomeFirstResponder',
+                'HasPreviousKeyResponder',
+                'AcceptsDictationResults',
+                False,
+                'UISearchBarTextField',
+                0,
+                True,
+                {'NS.keys': [UID(35)], 'NS.objects': [UID(32)], '$class': UID(36)},
+                'disabled',
+                {'$classname': 'NSDictionary', '$classes': ['NSDictionary', 'NSObject']},
+                {'$classname': 'RTIDocumentTraits', '$classes': ['RTIDocumentTraits', 'NSObject']},
+                typing_session.tsid.bytes
+            ]
+        }, fmt=plistlib.FMT_BINARY)
+
+        print(resp_plist)
+
+        await self._send_opack(FrameType.E_OPACK, {
+            "_i": "_tiStarted",
+            "_x": int.from_bytes(randbytes(2)),
+            "_c": {
+                "_tiV": 1,
+                "_tiD": resp_plist
+            }
+        })
+
 
     def connection_lost(self, error):
         logging.debug(f"{self._peername} connection lost")

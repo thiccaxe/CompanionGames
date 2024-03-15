@@ -19,8 +19,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import asyncio
 import binascii
 import copy
+import json
 import logging
 import random
+import uuid
 
 import websockets
 
@@ -50,7 +52,12 @@ class CompanionManager:
     async def companion_device_paired(self, hdpid, pairing):
         # save
         self._secrets["clients"][hdpid] = pairing
-        pass  # notify website?
+
+        # send to website
+        await self.send_to_website({
+            "event": "companion_games:event/device/paired",
+            "hdpid": hdpid,
+        })
 
     async def companion_device_connected(self, hdpid, protocol):
         if hdpid in self._data.connected_clients:
@@ -62,26 +69,54 @@ class CompanionManager:
             logging.debug(f"Companion device with ({hdpid=}) connected")
             pass
 
+        # send to website
+        await self.send_to_website({
+            "event": "companion_games:event/device/connected",
+            "hdpid": hdpid,
+        })
+
+
     async def companion_device_disconnected(self, hdpid):
         if hdpid in self._data.connected_clients:
             del self._data.connected_clients[hdpid]
             # notify website
             logging.debug(f"Companion device ({hdpid=}) connected")
+            # send to website
+            await self.send_to_website({
+                    "event": "companion_games:event/device/disconnected",
+                    "hdpid": hdpid,
+            })
         else:
             logging.warning(f"Disconnected a client with {hdpid=} when it never was connected!")
 
-    async def website_connected(self, websocket: websockets.WebSocketClientProtocol):
-        self._data.websocket = websocket
+    async def disconnect_device(self, hdpid):
+        if hdpid not in self._data.connected_clients:
+            logging.warning(f"Attempted to disconnect a device that was not connected")
+            return
+        proto = self._data.connected_clients[hdpid]
+        proto.close_transport()
+
+    async def website_connected(self, websocket: websockets.WebSocketServerProtocol):
+        self._data.connected_website = websocket
         logging.debug("Website connected")
 
     async def website_disconnected(self):
+        self._data.connected_website = None
         logging.debug("Website disconnected")
+
+    async def send_to_website(self, packet: dict):
+        if not self._data.connected_website:
+            logging.debug("Wanted to send data when website not connected")
+            return
+        packet.setdefault("id", random.randint(5_000_000, 2_000_000_000))
+        await self._data.connected_website.send(json.dumps(packet))
+
 
     async def temp_send_text(self, text):
         logging.debug(f"Broadcasting text {text}")
         for hdpid in copy.copy(self._data.connected_clients):
             typing_session = TypingSession(
-                tsid=binascii.hexlify(random.randbytes(4)).decode("utf-8"),
+                tsid=uuid.uuid4(),
                 meta={
                     "text": text,
                 },
@@ -98,7 +133,7 @@ class CompanionManager:
 
         typing_session.hdpid = hdpid
 
-        client.open_typing_session(typing_session)
+        await client.open_typing_session(typing_session)
 
 
 

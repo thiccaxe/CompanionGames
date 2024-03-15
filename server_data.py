@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
 import dataclasses
+import uuid
 from typing import Optional
 
 import websockets
@@ -25,7 +26,7 @@ import websockets
 
 @dataclasses.dataclass
 class TypingSession:
-    tsid: str
+    tsid: uuid.UUID
     meta: dict
     hdpid: str  # hashed device pairing id
 
@@ -34,7 +35,7 @@ class ServerData:
 
     def __init__(self):
         self.connected_clients: dict[str, asyncio.Protocol] = dict()
-        self.connected_website: Optional[websockets.WebSocketClientProtocol] = None
+        self.connected_website: Optional[websockets.WebSocketServerProtocol] = None
         self.typing_sessions: dict[str, TypingSession] = dict()
 
         self.shutdown_event = asyncio.Event()
