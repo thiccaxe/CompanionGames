@@ -56,11 +56,33 @@ class CompanionManager:
         if psid not in pairings:
             logging.warning(f"Pairing session {psid=} does not exist")
             return False
-        if allow_pairing is True: # need to disable all others
-            for pairing_session in pairings[psid].values():
+        if allow_pairing:  # need to disable all others
+            for pairing_session in pairings.values():
                 pairing_session["allow_pairing"] = False
-        pairings[psid]["allow_pairing"] = allow_pairing
+        pairings[psid]["allow_pairing"] = bool(allow_pairing)
         return True
+
+    def pairing_session_delete(self, psid):
+        pairings: dict = self._secrets["pairings"]
+        if psid not in pairings:
+            logging.warning(f"Pairing session {psid=} does not exist")
+            return False
+        del pairings[psid]
+
+    def pairing_session_create(self, pairing_options: dict) -> dict:
+        pairing = {k: v for k, v in pairing_options.items() if k in (
+            "allow_pairing", "allow_connections", "admin"
+        )}
+        pairing.setdefault("allow_pairing", False)
+        pairing.setdefault("allow_connections", True)
+        pairing.setdefault("admin", False)
+        pairing["pin"] = "{0:04}".format(random.randint(0, 9999))
+        psid = uuid.uuid4().hex
+        pairing["psid"] = psid
+
+        self._secrets["pairings"][psid] = pairing
+
+        return pairing
 
     def set_websocket_server(self, websocket_server):
         self._websocket_server = websocket_server

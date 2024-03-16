@@ -164,6 +164,37 @@ class WebsocketServer:
                 "event": "companion_games:event/successish/pairing/sessions/allow_pairing/updated",
             })
             return
+        elif packet["event"] == "companion_games:event/pairing/sessions/delete":
+            if not ("data" in packet and isinstance(packet["data"], str)):
+                await self._manager.send_to_website({
+                    "id": packet["id"],
+                    "event": "companion_games:event/error/malformed_request"
+                })
+                return
+            psid = packet["data"]
+
+            self._manager.pairing_session_delete(psid)
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/successish/pairing/sessions/deleted",
+            })
+            return
+        elif packet["event"] == "companion_games:event/pairing/sessions/create":
+            if not ("data" in packet and isinstance(packet["data"], dict)):
+                await self._manager.send_to_website({
+                    "id": packet["id"],
+                    "event": "companion_games:event/error/malformed_request"
+                })
+                return
+            pairing_options = packet["data"]
+
+            pairing = self._manager.pairing_session_create(pairing_options)
+            await self._manager.send_to_website({
+                "id": packet["id"],
+                "event": "companion_games:event/successish/pairing/sessions/deleted",
+                "data": pairing,
+            })
+            return
 
     async def __aenter__(self):
         if self._websocket_server is not None:

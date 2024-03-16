@@ -615,7 +615,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         self._auth_session = CompanionAuthSetupSession.create(
             self._config["server"]["id"].encode(),
             current_pairing_session["psid"],
-            "1234",
+            current_pairing_session["pin"],
             binascii.unhexlify(self._secrets["server"]["private_key"]),
         )
         logging.debug(self._auth_session)
