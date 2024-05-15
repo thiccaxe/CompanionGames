@@ -143,7 +143,7 @@ class CompanionAuthVerifySession:
         )
 
 
-@dataclasses.dataclass()
+@dataclasses.dataclass
 class CompanionAuthEncryptedSession:
     """
     used during regular encrypted use
@@ -161,6 +161,26 @@ class CompanionAuthEncryptedSession:
         # add 16 for "auth tag"
         return self.chacha.encrypt(frame_data, aad=header)
 
+
+@dataclasses.dataclass
+class CompanionAuthSetupEncryptedSession:
+    hdpid: str
+    chacha: Chacha20Cipher  # chacha based on keys derived from shared_key
+
+    def decrypt(self, frame_type, frame_data) -> bytes:
+        header = bytes([frame_type.value]) + len(frame_data).to_bytes(3, byteorder="big")
+        try:
+            return self.chacha.decrypt(bytes(frame_data), aad=header)
+        except Exception as e:
+            logging.exception(e)
+
+    def encrypt(self, frame_type: FrameType, frame_data: bytes) -> bytes:
+        header = bytes([frame_type.value]) + (len(frame_data) + 16).to_bytes(3, byteorder="big")
+        # add 16 for "auth tag"
+        try:
+            return self.chacha.encrypt(frame_data, aad=header)
+        except Exception as e:
+            logging.exception(e)
 
 @dataclasses.dataclass
 class CompanionAuthSetupSession:
@@ -241,7 +261,9 @@ class CompanionAuthSetupSession:
         self.encryption_chacha = Chacha20Cipher(
             hkdf_expand("", "ServerEncrypt-main", binascii.unhexlify(self.srp_session.key)),
             hkdf_expand("", "ClientEncrypt-main", binascii.unhexlify(self.srp_session.key)),
+            nonce_length=12,
         )
+        
 
     def encrypt(self, data, nonce):
         if self.session_chacha is None:
@@ -266,9 +288,9 @@ class CompanionAuthSetupSession:
         return self.server_lt_private_key.sign(server_info)
 
     def convert(self):
-        return CompanionAuthEncryptedSession(
-            binascii.hexlify(self.hdpid).decode("utf-8"),
-            self.encryption_chacha,
+        return CompanionAuthSetupEncryptedSession(
+            hdpid=binascii.hexlify(self.hdpid).decode("utf-8"),
+            chacha=self.encryption_chacha,
         )
 
 
@@ -533,8 +555,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
     async def _handle_play_frame(self, frame_type, frame_data):
         logging.debug(f"{self._peername} handling play frame")
-        if self._session is None or self._auth_session is None or not isinstance(self._auth_session,
-                                                                                 CompanionAuthEncryptedSession):
+        if self._session is None or self._auth_session is None or not (
+            isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session, CompanionAuthSetupEncryptedSession)
+            ):
             logging.debug(f"{self._peername} not ready for this packet")
             return
 
@@ -544,6 +567,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         try:
 
             unencrypted_frame_data = self._auth_session.decrypt(frame_type, frame_data)
+            logging.debug(f"{self._peername} Handling unencrypted play frame with length {len(unencrypted_frame_data)}: {binascii.hexlify(unencrypted_frame_data)}")
+
             frame: dict = opack.unpack(unencrypted_frame_data)[0]
             logging.debug(f"{self._peername} {frame=}")
 
@@ -594,7 +619,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         logging.debug(f"{self._peername} Sending with {frame_type=}")
         logging.debug(f"{self._peername} Sending data: {binascii.hexlify(frame_data)}")
 
-        if isinstance(self._auth_session, CompanionAuthEncryptedSession):
+        if (isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session, CompanionAuthSetupEncryptedSession)):
             frame_data = self._auth_session.encrypt(frame_type, frame_data)
             logging.debug(f"{self._peername} Sending encrypted data: {binascii.hexlify(frame_data)}")
 
