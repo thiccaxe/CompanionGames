@@ -320,6 +320,7 @@ class CompanionDummySession(CompanionSession):
             "_hidT": self._handle_hid_touchpad,
             "_hidC": self._handle_hid_click,
         }
+        self.send_opack = None
 
     async def handle_frame(self, frame):
         response: dict = None
@@ -407,7 +408,26 @@ class CompanionDummySession(CompanionSession):
         pass  # ignore
 
     def _handle_interest_packet(self, frame):
-        pass  # ignore
+        if "_c" not in frame:
+            logging.debug("No _c (content) in frame!")
+            return
+        frame_content = frame["_c"]
+
+        if "_regEvents" not in frame_content:
+            return
+        register_events = frame_content["_regEvents"]
+        if "_iMC" in register_events:
+            loop = asyncio.get_event_loop()
+            loop.create_task(self._send_imc_later(1843))
+        return None
+
+    async def _send_imc_later(self, flags):
+        await asyncio.sleep(3)
+        logging.debug("sending out imc opack")
+        print(self.send_opack)
+        await self.send_opack(FrameType.E_OPACK, {'_i': '_iMC', '_x': int.from_bytes(randbytes(4)), '_c': {'_mcF': flags}, '_t': 1})
+        
+
 
     def _handle_fetch_attention_state(self, frame):
         return {
@@ -759,6 +779,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         self._auth_session = self._auth_session.convert()
         self._session = CompanionDummySession(self._config, self._secrets)
+        self._session.send_opack = self._send_opack
         # technically connected
         await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
@@ -915,6 +936,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
 
         self._auth_session = self._auth_session.convert()
         self._session = CompanionDummySession(self._config, self._secrets)
+        self._session.send_opack = self._send_opack
 
         await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
