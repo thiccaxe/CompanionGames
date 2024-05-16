@@ -120,7 +120,7 @@ class CompanionManager:
         if hdpid in self._data.connected_clients:
             del self._data.connected_clients[hdpid]
             # notify website
-            logging.debug(f"Companion device ({hdpid=}) connected")
+            logging.debug(f"Companion device ({hdpid=}) disconnected")
             # send to website
             await self.send_to_website({
                 "event": "companion_games:event/device/disconnected",
