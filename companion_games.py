@@ -25,6 +25,7 @@ from config import Config, ConfigurationLoadError
 from logger import setup_logging
 from mdns_registration import CompanionGamesZeroconf
 from server_data import ServerData
+from wayland_input import WaylandInput
 from websocket_server import WebsocketServer
 
 
@@ -39,6 +40,8 @@ class CompanionGames:
         self._manager = CompanionManager(self._config, self._secrets, self._loop, self._data)
         self._websocket_server = WebsocketServer(self._config, self._secrets, self._loop, self._data, self._manager)
         self._companion_server = CompanionServer(self._config, self._secrets, self._loop, self._data, self._manager)
+        self._wayland_input = WaylandInput(self._loop)
+        self._manager._wayland_input = self._wayland_input
 
     async def handler(self, websocket):
         while True:
@@ -47,21 +50,23 @@ class CompanionGames:
 
     async def begin(self):
         logging.info("Starting Companion Games Server")
-        async with self._mdns:
-            logging.info("Starting Companion Games Websocket Server")
-            async with self._websocket_server:
-                logging.info("Starting Companion Games Companion Server")
-                async with self._companion_server:
-                    try:
-                        logging.info("Ctrl^C to quit")
-                        while True:
-                            await asyncio.sleep(1)
-                    except asyncio.CancelledError:
-                        logging.info("Cancelled ...")
-                    except KeyboardInterrupt:
-                        logging.info("Cancelled ...")
-                    finally:
-                        logging.info("Stopping Server ...")
+        async with self._wayland_input:
+            logging.info("Starting MDNS")
+            async with self._mdns:
+                logging.info("Starting Companion Games Websocket Server")
+                async with self._websocket_server:
+                    logging.info("Starting Companion Games Companion Server")
+                    async with self._companion_server:
+                        try:
+                            logging.info("Ctrl^C to quit")
+                            while True:
+                                await asyncio.sleep(1)
+                        except asyncio.CancelledError:
+                            logging.info("Cancelled ...")
+                        except KeyboardInterrupt:
+                            logging.info("Cancelled ...")
+                        finally:
+                            logging.info("Stopping Server ...")
 
 
 async def main():

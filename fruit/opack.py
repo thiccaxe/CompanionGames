@@ -1,14 +1,11 @@
-"""
-This file includes a significant portion of pyatv - see ATTRIBUTION.txt
-"""
 """Support for the OPACK serialization format.
 
 Notes:
- * Absolute time (0x06) is not implemented (can unpack as integer, not pack)
  * Pack implementation does not implement UID referencing
  * Likely other cases missing
 """
-from datetime import datetime
+
+import datetime
 
 # pylint: disable=too-many-branches,too-many-return-statements,too-many-statements
 import struct
@@ -17,6 +14,8 @@ from uuid import UUID
 
 _SIZED_INT_TYPES: Dict[int, Type] = {}
 
+# opack-encoded timestamps are offset from posix time and need to be adjusted.
+_OPACK_TIME_OFFSET = datetime.datetime.fromisoformat("2001-01-01T00:00:00.000Z")
 
 def _sized_int(value: int, size: int) -> int:
     """Return an int subclass with a size attribute.
@@ -45,8 +44,10 @@ def _pack(data, object_list):
         packed_bytes = bytes([1 if data else 2])
     elif isinstance(data, UUID):
         packed_bytes = b"\x05" + data.bytes
-    elif isinstance(data, datetime):
-        raise NotImplementedError("absolute time")
+    elif isinstance(data, datetime.datetime):
+        packed_bytes = b"\x06" + struct.pack(
+            ">d", datetime_to_opack_time(data)
+        )
     elif isinstance(data, int):
         size_hint = getattr(data, "size", None)  # if created with _sized_int()
         if data < 0x28 and not size_hint:
@@ -73,13 +74,13 @@ def _pack(data, object_list):
             packed_bytes = (
                 bytes([0x62]) + len(encoded).to_bytes(2, byteorder="little") + encoded
             )
-        elif len(encoded) <= 0xFFFFFF:
+        elif len(encoded) <= 0xFFFF_FFFF:
             packed_bytes = (
-                bytes([0x63]) + len(encoded).to_bytes(3, byteorder="little") + encoded
+                bytes([0x63]) + len(encoded).to_bytes(4, byteorder="little") + encoded
             )
-        elif len(encoded) <= 0xFFFFFFFF:
+        elif len(encoded) <= 0xFFFF_FFFF_FFFF_FFFF:
             packed_bytes = (
-                bytes([0x64]) + len(encoded).to_bytes(4, byteorder="little") + encoded
+                bytes([0x64]) + len(encoded).to_bytes(8, byteorder="little") + encoded
             )
     elif isinstance(data, bytes):
         if len(data) <= 0x20:
@@ -92,13 +93,13 @@ def _pack(data, object_list):
             packed_bytes = (
                 bytes([0x92]) + len(data).to_bytes(2, byteorder="little") + data
             )
-        elif len(data) <= 0xFFFFFF:
+        elif len(data) <= 0xFFFF_FFFF:
             packed_bytes = (
-                bytes([0x93]) + len(data).to_bytes(3, byteorder="little") + data
+                bytes([0x93]) + len(data).to_bytes(4, byteorder="little") + data
             )
-        elif len(data) <= 0xFFFFFFFF:
+        elif len(data) <= 0xFFFF_FFFF_FFFF_FFFF:
             packed_bytes = (
-                bytes([0x94]) + len(data).to_bytes(4, byteorder="little") + data
+                bytes([0x94]) + len(data).to_bytes(8, byteorder="little") + data
             )
     elif isinstance(data, list):
         packed_bytes = bytes([0xD0 + min(len(data), 0xF)]) + b"".join(
@@ -156,8 +157,10 @@ def _unpack(data, object_list):
         value = UUID(bytes=data[1:17])
         remaining = data[17:]
     elif data[0] == 0x06:
-        # TODO: Dummy implementation: only parse as integer
-        value, remaining = int.from_bytes(data[1:9], byteorder="little"), data[9:]
+        value, remaining = (
+            opack_time_to_datetime(struct.unpack(">d", data[1:9])[0]),
+            data[9:],
+        )
     elif 0x08 <= data[0] <= 0x2F:
         value, remaining = data[0] - 8, data[1:]
         add_to_object_list = False
@@ -186,8 +189,8 @@ def _unpack(data, object_list):
     elif 0x70 <= data[0] <= 0x90:
         length = data[0] - 0x70
         value, remaining = data[1 : 1 + length], data[1 + length :]
-    elif 0x90 < data[0] <= 0x94:
-        noof_bytes = data[0] & 0xF
+    elif 0x91 <= data[0] <= 0x94:
+        noof_bytes = 1 << ((data[0] & 0xF) - 1)
         length = int.from_bytes(data[1 : 1 + noof_bytes], byteorder="little")
         value, remaining = (
             data[1 + noof_bytes : 1 + noof_bytes + length],
@@ -241,3 +244,12 @@ def _unpack(data, object_list):
         object_list.append(value)
 
     return value, remaining
+
+
+def opack_time_to_datetime(opack_time: float) -> datetime.datetime:
+    """Convert an opack-encoded timestamp to a datetime"""
+    return _OPACK_TIME_OFFSET + datetime.timedelta(seconds=opack_time)
+
+def datetime_to_opack_time(date: datetime.datetime) -> float:
+    """Convert a datetime object to an opack-encoded timestamp"""
+    return (date.timestamp() - _OPACK_TIME_OFFSET.timestamp())

@@ -15,8 +15,12 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+import base64
 
-import asyncio
+import keyed_archiver
+
+true = True
+import asyncio, aiofiles
 import binascii
 import dataclasses
 import hashlib
@@ -26,8 +30,10 @@ import plistlib
 import secrets
 import time
 import uuid
+import datetime
 from asyncio import Server
-from plistlib import UID
+
+UID = plistlib.UID
 
 import cryptography.exceptions
 import tomlkit
@@ -37,7 +43,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PublicKey,
 )
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
-from random import randbytes
+from random import randbytes, randint
 from srptools import SRPContext, SRPServerSession, constants
 
 from typing import Optional, List, Union, Tuple
@@ -182,6 +188,7 @@ class CompanionAuthSetupEncryptedSession:
         except Exception as e:
             logging.exception(e)
 
+
 @dataclasses.dataclass
 class CompanionAuthSetupSession:
     """
@@ -263,7 +270,6 @@ class CompanionAuthSetupSession:
             hkdf_expand("", "ClientEncrypt-main", binascii.unhexlify(self.srp_session.key)),
             nonce_length=12,
         )
-        
 
     def encrypt(self, data, nonce):
         if self.session_chacha is None:
@@ -301,10 +307,12 @@ class CompanionSession:
 
 
 class CompanionDummySession(CompanionSession):
-    def __init__(self, config, secrets):
+    def __init__(self, config, secrets, manager, hdpid):
         super(CompanionDummySession, self).__init__()
         self._config = config
         self._secrets = secrets
+        self._manager = manager
+        self._hdpid = hdpid
         self._companion_services = dict()
         self._touch = None
         self._packet_handlers = {
@@ -320,6 +328,7 @@ class CompanionDummySession(CompanionSession):
             "_hidT": self._handle_hid_touchpad,
             "_hidC": self._handle_hid_click,
             "_siriStop": self._handle_siri_stop,
+            "_tiC": self._handle_text_input
         }
         self._packets_return_nothing = ["_siA"]
         self.send_opack = None
@@ -335,7 +344,9 @@ class CompanionDummySession(CompanionSession):
             if packet_type in self._packet_handlers:
                 packet_handler = self._packet_handlers[packet_type]
                 if inspect.iscoroutinefunction(packet_handler):
+                    logging.debug(f"{packet_type} was a coro")
                     response = await packet_handler(frame)
+                    logging.debug("got past that handler!")
                 else:
                     response = packet_handler(frame)
             if packet_type in self._packets_return_nothing:
@@ -347,58 +358,102 @@ class CompanionDummySession(CompanionSession):
 
         return response
 
+    async def _handle_text_input(self, frame):
+        logging.debug(f"test1234")
+        kb_data_plist = frame.get("_c", {}).get("_tiD")
+        if kb_data_plist is None:
+            return
+
+        kb_data = plistlib.loads(kb_data_plist)
+        logging.debug(f"{kb_data=}")
+        try:
+            insertion, deletion = keyed_archiver.read_archive_properties(
+                kb_data,
+                ["textOperations", "keyboardOutput", "insertionText"],
+                ["textOperations", "keyboardOutput", "deletionCount"]
+            )
+            if insertion is not None:
+                logging.debug(f"{insertion} inserted")
+                await self._manager.text_inserted(self._hdpid, insertion)
+            if deletion is not None:
+                logging.debug(f"{deletion} deleted")
+                await self._manager.text_delete_count(self._hdpid, deletion)
+        except Exception as e:
+            logging.error(e)
+
     def _handle_system_info_packet(self, frame):
         response = {
             "_c": {
                 "_pubID": self._config["server"]["mac"],
                 "_mRtID": self._config["server"]["id"],
                 "_dCapF": 1,
-                "_sv": "530.1.1",
+                "_sv": "604.1",
                 "_bf": 1920,
                 "_lP": int(self._config["server"]["companion_port"]),
                 "_mrID": self._config["server"]["id"],
                 # '_accAltDSID': '',
                 "_i": "ee179ccc3aae",
                 "_clFl": 128,
+                # '_stA': [
+                #     'com.apple.callservicesd.CompanionLinkManager',
+                #     'com.apple.bluetooth.remote',
+                #     'com.apple.biomesyncd.rapport',
+                #     'com.apple.SeymourSession',
+                #     'com.apple.tvremoteservices',
+                #     'com.apple.wifivelocityd.rapportWake',
+                #     'com.apple.siri.wakeup',
+                #     'com.apple.Seymour',
+                #     'com.apple.home.messaging',
+                #     'com.apple.workflow.remotewidgets',
+                #     'com.apple.coreduet.sync',
+                #     'com.apple.devicediscoveryui.rapportwake',
+                #     'com.apple.LiveAudio'
+                # ],
                 '_stA': [
                     'com.apple.callservicesd.CompanionLinkManager',
                     'com.apple.bluetooth.remote',
-                    'com.apple.biomesyncd.rapport',
+                    'com.apple.biomesyncd.cascade.rapport',
                     'com.apple.SeymourSession',
-                    'com.apple.tvremoteservices',
                     'com.apple.wifivelocityd.rapportWake',
                     'com.apple.siri.wakeup',
                     'com.apple.siri.wakeup',
-                    'com.apple.Seymour',
-                    'com.apple.home.messaging',
-                    'com.apple.workflow.remotewidgets',
-                    'com.apple.coreduet.sync',
                     'com.apple.devicediscoveryui.rapportwake',
-                    'com.apple.LiveAudio'
+                    'com.apple.Seymour',
+                    'com.apple.networkrelay.on-demand-setup',
+                    'com.apple.tvremoteservices',
+                    'com.apple.biomesyncd.rapport',
+                    'com.apple.home.messaging',
+                    'com.apple.accessibility.axremoted.rapportWake',
+                    'com.apple.workflow.remotewidgets'
                 ],
                 '_siriInfo': {
                     'peerData': {
                         'assistantIdentifier': 'DBF788B4-3D0D-4506-BCA6-BD125BC5AE8A',
-                        'buildVersion': '21K646',
+                        'buildVersion': '22J5356a',
                         'productType': 'AppleTV5,3',
                         'sharedUserIdentifier': '76499B25-147E-4338-A6B3-9606316A9192',
                         'isLocationSharingDevice': False,
                         'aceVersion': '13.0-20A',
                         'userInterfaceIdiom': 'ZEUS',
                         'isSiriCloudSyncEnabled': True,
-                        'userAssignedDeviceName': self._config["server"]["name"]
+                        'userAssignedDeviceName': self._config["server"]["name"],
+                        'trialTreatment': '',
                     },
                     'collectorElectionVersion': float(1.0),
                     'deviceCapabilities': {
                         'voiceTriggerEnabled': 1
                     },
                     'audio-session-coordination.system-info': {
-                       'isSupportedAndEnabled': False,
-                       'mediaRemoteGroupIdentifier': 'D88585C6-EEEC-4D8A-AE03-93BA62F170AD', # _airplay._tcp -> gid
-                       'mediaRemoteRouteIdentifier': '675705BA-004D-47AE-BF8C-FFDCDA9A4706', # _airplay._tcp -> psi
+                        'isSupportedAndEnabled': False,
+                        'mediaRemoteGroupIdentifier': 'D88585C6-EEEC-4D8A-AE03-93BA62F170AD',  # _airplay._tcp -> gid
+                        'mediaRemoteRouteIdentifier': '675705BA-004D-47AE-BF8C-FFDCDA9A4706',  # _airplay._tcp -> psi
                     },
                     'deviceCapabilitiesV2': [
-                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10$SVDAssistantEnabledCapabilityBackingV$class\x80\x02\x80\n\xd4\x12\x0e\x13\x14\x15\x16\x17\x18_\x107primitivesMap_AssistantEnabledCapability::supportStatusSkey]primitiveKeys\x80\x07\x80\t\x80\x03\x80\x04_\x10\x1aAssistantEnabledCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10)AssistantEnabledCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x106SiriVirtualDeviceResolution.AssistantEnabledCapability\xa21%_\x106SiriVirtualDeviceResolution.AssistantEnabledCapability\xd2!"34_\x10\x1dSVDAssistantEnabledCapability\xa356%_\x10\x1dSVDAssistantEnabledCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x91\x00\x98\x00\x9a\x00\x9c\x00\xa5\x00\xdf\x00\xe3\x00\xf1\x00\xf3\x00\xf5\x00\xf7\x00\xf9\x01\x16\x01\x1b\x01&\x01(\x01*\x01,\x01X\x01]\x01h\x01q\x01y\x01|\x01\x85\x01\x8a\x01\x98\x01\x9a\x01\x9c\x01\xa1\x01\xc1\x01\xc4\x01\xe4\x01\xe9\x02"\x02%\x02^\x02c\x02\x83\x02\x87\x02\xa7\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xb5', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10 SVDVoiceTriggerCapabilityBackingV$class\x80\x02\x80\n\xd4\x12\x0e\x13\x14\x15\x16\x17\x18_\x103primitivesMap_VoiceTriggerCapability::supportStatusSkey]primitiveKeys\x80\x07\x80\t\x80\x03\x80\x04_\x10\x16VoiceTriggerCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10%VoiceTriggerCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x02\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x102SiriVirtualDeviceResolution.VoiceTriggerCapability\xa21%_\x102SiriVirtualDeviceResolution.VoiceTriggerCapability\xd2!"34_\x10\x19SVDVoiceTriggerCapability\xa356%_\x10\x19SVDVoiceTriggerCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8d\x00\x94\x00\x96\x00\x98\x00\xa1\x00\xd7\x00\xdb\x00\xe9\x00\xeb\x00\xed\x00\xef\x00\xf1\x01\n\x01\x0f\x01\x1a\x01\x1c\x01\x1e\x01 \x01H\x01M\x01X\x01a\x01i\x01l\x01u\x01z\x01\x88\x01\x8a\x01\x8c\x01\x91\x01\xb1\x01\xb4\x01\xd4\x01\xd9\x02\x0e\x02\x11\x02F\x02K\x02g\x02k\x02\x87\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x95', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10\x17SVDMUXCapabilityBackingV$class\x80\x02\x80\n\xd4\x0e\x12\x13\x14\x15\x16\x17\x18_\x10*primitivesMap_MUXCapability::supportStatusSkey]primitiveKeys\x80\t\x80\x07\x80\x03\x80\x04]MUXCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10\x1cMUXCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x02\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x10)SiriVirtualDeviceResolution.MUXCapability\xa21%_\x10)SiriVirtualDeviceResolution.MUXCapability\xd2!"34_\x10\x10SVDMUXCapability\xa356%_\x10\x10SVDMUXCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x84\x00\x8b\x00\x8d\x00\x8f\x00\x98\x00\xc5\x00\xc9\x00\xd7\x00\xd9\x00\xdb\x00\xdd\x00\xdf\x00\xed\x00\xf2\x00\xfd\x00\xff\x01\x01\x01\x03\x01"\x01\'\x012\x01;\x01C\x01F\x01O\x01T\x01b\x01d\x01f\x01k\x01\x8b\x01\x8e\x01\xae\x01\xb3\x01\xdf\x01\xe2\x02\x0e\x02\x13\x02&\x02*\x02=\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02K', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10\x1dSVDAppLaunchCapabilityBackingV$class\x80\x02\x80\n\xd4\x0e\x12\x13\x14\x15\x16\x17\x18Skey_\x100primitivesMap_AppLaunchCapability::supportStatus]primitiveKeys\x80\t\x80\x03\x80\x07\x80\x04_\x10\x13AppLaunchCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10"AppLaunchCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x10/SiriVirtualDeviceResolution.AppLaunchCapability\xa21%_\x10/SiriVirtualDeviceResolution.AppLaunchCapability\xd2!"34_\x10\x16SVDAppLaunchCapability\xa356%_\x10\x16SVDAppLaunchCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8a\x00\x91\x00\x93\x00\x95\x00\x9e\x00\xa2\x00\xd5\x00\xe3\x00\xe5\x00\xe7\x00\xe9\x00\xeb\x01\x01\x01\x06\x01\x11\x01\x13\x01\x15\x01\x17\x01<\x01A\x01L\x01U\x01]\x01`\x01i\x01n\x01|\x01~\x01\x80\x01\x85\x01\xa5\x01\xa8\x01\xc8\x01\xcd\x01\xff\x02\x02\x024\x029\x02R\x02V\x02o\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02}', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10!SVDVideoPlaybackCapabilityBackingV$class\x80\x02\x80\n\xd4\x0e\x12\x13\x14\x15\x16\x17\x18Skey_\x104primitivesMap_VideoPlaybackCapability::supportStatus]primitiveKeys\x80\t\x80\x03\x80\x07\x80\x04_\x10\x17VideoPlaybackCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10&VideoPlaybackCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x103SiriVirtualDeviceResolution.VideoPlaybackCapability\xa21%_\x103SiriVirtualDeviceResolution.VideoPlaybackCapability\xd2!"34_\x10\x1aSVDVideoPlaybackCapability\xa356%_\x10\x1aSVDVideoPlaybackCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8e\x00\x95\x00\x97\x00\x99\x00\xa2\x00\xa6\x00\xdd\x00\xeb\x00\xed\x00\xef\x00\xf1\x00\xf3\x01\r\x01\x12\x01\x1d\x01\x1f\x01!\x01#\x01L\x01Q\x01\\\x01e\x01m\x01p\x01y\x01~\x01\x8c\x01\x8e\x01\x90\x01\x95\x01\xb5\x01\xb8\x01\xd8\x01\xdd\x02\x13\x02\x16\x02L\x02Q\x02n\x02r\x02\x8f\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x9d', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10"SVDSeymourRoutingCapabilityBackingV$class\x80\x02\x80\n\xd4\x12\x0e\x13\x14\x15\x16\x17\x18_\x105primitivesMap_SeymourRoutingCapability::supportStatusSkey]primitiveKeys\x80\x07\x80\t\x80\x03\x80\x04_\x10\x18SeymourRoutingCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10\'SeymourRoutingCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x104SiriVirtualDeviceResolution.SeymourRoutingCapability\xa21%_\x104SiriVirtualDeviceResolution.SeymourRoutingCapability\xd2!"34_\x10\x1bSVDSeymourRoutingCapability\xa356%_\x10\x1bSVDSeymourRoutingCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8f\x00\x96\x00\x98\x00\x9a\x00\xa3\x00\xdb\x00\xdf\x00\xed\x00\xef\x00\xf1\x00\xf3\x00\xf5\x01\x10\x01\x15\x01 \x01"\x01$\x01&\x01P\x01U\x01`\x01i\x01q\x01t\x01}\x01\x82\x01\x90\x01\x92\x01\x94\x01\x99\x01\xb9\x01\xbc\x01\xdc\x01\xe1\x02\x18\x02\x1b\x02R\x02W\x02u\x02y\x02\x97\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xa5', b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10V$class_\x10$SVDProfileSwitchingCapabilityBacking\x80\n\x80\x02\xd4\x12\r\x13\x14\x15\x16\x17\x18]primitiveKeysSkey_\x107primitivesMap_ProfileSwitchingCapability::supportStatus\x80\x04\x80\t\x80\x03\x80\x07_\x10\x1aProfileSwitchingCapability\xd2\x1b\r\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10)ProfileSwitchingCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\r()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x106SiriVirtualDeviceResolution.ProfileSwitchingCapability\xa21%_\x106SiriVirtualDeviceResolution.ProfileSwitchingCapability\xd2!"34_\x10\x1dSVDProfileSwitchingCapability\xa356%_\x10\x1dSVDProfileSwitchingCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00q\x00\x98\x00\x9a\x00\x9c\x00\xa5\x00\xb3\x00\xb7\x00\xf1\x00\xf3\x00\xf5\x00\xf7\x00\xf9\x01\x16\x01\x1b\x01&\x01(\x01*\x01,\x01X\x01]\x01h\x01q\x01y\x01|\x01\x85\x01\x8a\x01\x98\x01\x9a\x01\x9c\x01\xa1\x01\xc1\x01\xc4\x01\xe4\x01\xe9\x02"\x02%\x02^\x02c\x02\x83\x02\x87\x02\xa7\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xb5'
+                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10$SVDAssistantEnabledCapabilityBackingV$class\x80\x02\x80\n\xd4\x12\x0e\x13\x14\x15\x16\x17\x18_\x107primitivesMap_AssistantEnabledCapability::supportStatusSkey]primitiveKeys\x80\x07\x80\t\x80\x03\x80\x04_\x10\x1aAssistantEnabledCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10)AssistantEnabledCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x106SiriVirtualDeviceResolution.AssistantEnabledCapability\xa21%_\x106SiriVirtualDeviceResolution.AssistantEnabledCapability\xd2!"34_\x10\x1dSVDAssistantEnabledCapability\xa356%_\x10\x1dSVDAssistantEnabledCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x91\x00\x98\x00\x9a\x00\x9c\x00\xa5\x00\xdf\x00\xe3\x00\xf1\x00\xf3\x00\xf5\x00\xf7\x00\xf9\x01\x16\x01\x1b\x01&\x01(\x01*\x01,\x01X\x01]\x01h\x01q\x01y\x01|\x01\x85\x01\x8a\x01\x98\x01\x9a\x01\x9c\x01\xa1\x01\xc1\x01\xc4\x01\xe4\x01\xe9\x02"\x02%\x02^\x02c\x02\x83\x02\x87\x02\xa7\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xb5',
+                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10\x1dSVDAppLaunchCapabilityBackingV$class\x80\x02\x80\n\xd4\x0e\x12\x13\x14\x15\x16\x17\x18Skey_\x100primitivesMap_AppLaunchCapability::supportStatus]primitiveKeys\x80\t\x80\x03\x80\x07\x80\x04_\x10\x13AppLaunchCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10"AppLaunchCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x10/SiriVirtualDeviceResolution.AppLaunchCapability\xa21%_\x10/SiriVirtualDeviceResolution.AppLaunchCapability\xd2!"34_\x10\x16SVDAppLaunchCapability\xa356%_\x10\x16SVDAppLaunchCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8a\x00\x91\x00\x93\x00\x95\x00\x9e\x00\xa2\x00\xd5\x00\xe3\x00\xe5\x00\xe7\x00\xe9\x00\xeb\x01\x01\x01\x06\x01\x11\x01\x13\x01\x15\x01\x17\x01<\x01A\x01L\x01U\x01]\x01`\x01i\x01n\x01|\x01~\x01\x80\x01\x85\x01\xa5\x01\xa8\x01\xc8\x01\xcd\x01\xff\x02\x02\x024\x029\x02R\x02V\x02o\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02}',
+                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10!SVDVideoPlaybackCapabilityBackingV$class\x80\x02\x80\n\xd4\x0e\x12\x13\x14\x15\x16\x17\x18Skey_\x104primitivesMap_VideoPlaybackCapability::supportStatus]primitiveKeys\x80\t\x80\x03\x80\x07\x80\x04_\x10\x17VideoPlaybackCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10&VideoPlaybackCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x103SiriVirtualDeviceResolution.VideoPlaybackCapability\xa21%_\x103SiriVirtualDeviceResolution.VideoPlaybackCapability\xd2!"34_\x10\x1aSVDVideoPlaybackCapability\xa356%_\x10\x1aSVDVideoPlaybackCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8e\x00\x95\x00\x97\x00\x99\x00\xa2\x00\xa6\x00\xdd\x00\xeb\x00\xed\x00\xef\x00\xf1\x00\xf3\x01\r\x01\x12\x01\x1d\x01\x1f\x01!\x01#\x01L\x01Q\x01\\\x01e\x01m\x01p\x01y\x01~\x01\x8c\x01\x8e\x01\x90\x01\x95\x01\xb5\x01\xb8\x01\xd8\x01\xdd\x02\x13\x02\x16\x02L\x02Q\x02n\x02r\x02\x8f\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x9d',
+                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10_\x10"SVDSeymourRoutingCapabilityBackingV$class\x80\x02\x80\n\xd4\x12\x0e\x13\x14\x15\x16\x17\x18_\x105primitivesMap_SeymourRoutingCapability::supportStatusSkey]primitiveKeys\x80\x07\x80\t\x80\x03\x80\x04_\x10\x18SeymourRoutingCapability\xd2\x1b\x0e\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10\'SeymourRoutingCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\x0e()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x104SiriVirtualDeviceResolution.SeymourRoutingCapability\xa21%_\x104SiriVirtualDeviceResolution.SeymourRoutingCapability\xd2!"34_\x10\x1bSVDSeymourRoutingCapability\xa356%_\x10\x1bSVDSeymourRoutingCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00\x8f\x00\x96\x00\x98\x00\x9a\x00\xa3\x00\xdb\x00\xdf\x00\xed\x00\xef\x00\xf1\x00\xf3\x00\xf5\x01\x10\x01\x15\x01 \x01"\x01$\x01&\x01P\x01U\x01`\x01i\x01q\x01t\x01}\x01\x82\x01\x90\x01\x92\x01\x94\x01\x99\x01\xb9\x01\xbc\x01\xdc\x01\xe1\x02\x18\x02\x1b\x02R\x02W\x02u\x02y\x02\x97\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xa5',
+                        b'bplist00\xd4\x01\x02\x03\x04\x05\x06\x07\nX$versionY$archiverT$topX$objects\x12\x00\x01\x86\xa0_\x10\x0fNSKeyedArchiver\xd1\x08\tTroot\x80\x01\xab\x0b\x0c\x11\x19\x1a\x1f &*.2U$null\xd2\r\x0e\x0f\x10V$class_\x10$SVDProfileSwitchingCapabilityBacking\x80\n\x80\x02\xd4\x12\r\x13\x14\x15\x16\x17\x18]primitiveKeysSkey_\x107primitivesMap_ProfileSwitchingCapability::supportStatus\x80\x04\x80\t\x80\x03\x80\x07_\x10\x1aProfileSwitchingCapability\xd2\x1b\r\x1c\x1eZNS.objects\xa1\x1d\x80\x05\x80\x06_\x10)ProfileSwitchingCapability::supportStatus\xd2!"#$Z$classnameX$classesWNSArray\xa2#%XNSObject\xd2\'\r()]supportStatus\x10\x01\x80\x08\xd2!"+,_\x10\x1dSVDBooleanCapabilityPrimitive\xa2-%_\x10\x1dSVDBooleanCapabilityPrimitive\xd2!"/0_\x106SiriVirtualDeviceResolution.ProfileSwitchingCapability\xa21%_\x106SiriVirtualDeviceResolution.ProfileSwitchingCapability\xd2!"34_\x10\x1dSVDProfileSwitchingCapability\xa356%_\x10\x1dSVDProfileSwitchingCapability]SVDCapability\x00\x08\x00\x11\x00\x1a\x00$\x00)\x002\x007\x00I\x00L\x00Q\x00S\x00_\x00e\x00j\x00q\x00\x98\x00\x9a\x00\x9c\x00\xa5\x00\xb3\x00\xb7\x00\xf1\x00\xf3\x00\xf5\x00\xf7\x00\xf9\x01\x16\x01\x1b\x01&\x01(\x01*\x01,\x01X\x01]\x01h\x01q\x01y\x01|\x01\x85\x01\x8a\x01\x98\x01\x9a\x01\x9c\x01\xa1\x01\xc1\x01\xc4\x01\xe4\x01\xe9\x02"\x02%\x02^\x02c\x02\x83\x02\x87\x02\xa7\x00\x00\x00\x00\x00\x00\x02\x01\x00\x00\x00\x00\x00\x00\x007\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\xb5'
                     ],
                 },
                 '_idsID': '330945A2-ED74-4CE8-AE78-A26D53307FD9',
@@ -513,6 +568,10 @@ class CompanionDummySession(CompanionSession):
                 'pad': {
                     "width": width,
                     "height": height,
+                },
+                'last_touch': {
+                    "x": None,
+                    "y": None,
                 }
             }
         except KeyError:
@@ -527,25 +586,61 @@ class CompanionDummySession(CompanionSession):
         self._touch = None
         pass
 
-    def _handle_hid_touchpad(self, frame):
+    async def _handle_hid_touchpad(self, frame):
         if self._touch is None:
             return
 
         if "_c" not in frame:
             return
 
+        content = frame["_c"]
+        move_type = content.get("_tPh", None)
+        cx = content.get("_cx", None)
+        cy = content.get("_cy", None)
+        dx = 0
+        dy = 0
+        if move_type == 1:
+            if isinstance(cx, int):
+                self._touch["last_touch"]["x"] = cx
+
+            if isinstance(cy, int):
+                self._touch["last_touch"]["y"] = cy
+        if move_type == 3 or move_type == 4:
+            if isinstance(cx, int):
+                if self._touch["last_touch"]["x"] is not None:
+                    dx = cx - self._touch["last_touch"]["x"]
+                self._touch["last_touch"]["x"] = cx
+
+            if isinstance(cy, int):
+                if self._touch["last_touch"]["y"] is not None:
+                    dy = cy - self._touch["last_touch"]["y"]
+                self._touch["last_touch"]["y"] = cy
+            content["_dx"] = dx
+            content["_dy"] = dy
+
+        try:
+            # logging.debug(f"{1 / 0}")
+            await self._manager.on_hidt(self._hdpid, frame)
+        except Exception as e:
+            logging.error(e)
+
         frame_content = frame["_c"]
 
         logging.debug(
             f"Touchpad: ({frame_content.get('_cx', '?')}, {frame_content.get('_cy', '?')}) ")
-        
 
-    def _handle_hid_click(self, frame):
-        pass
+    async def _handle_hid_click(self, frame):
+        try:
+            # logging.debug(f"{1 / 0}")
+            await self._manager.on_hidc(self._hdpid, frame)
+        except Exception as e:
+            logging.error(e)
+        logging.debug(f"hid_click @3: {frame.get("_c", {})}")
+        return None
 
     def _handle_siri_stop(self, frame):
         asyncio.create_task(self._send_siri_endpoint_later())
-    
+
     async def _send_siri_endpoint_later(self):
         await asyncio.sleep(0.3)
         await self.send_opack(FrameType.E_OPACK, {
@@ -557,6 +652,7 @@ class CompanionDummySession(CompanionSession):
 
 class CompanionConnectionProtocol(asyncio.Protocol):
     _peername: Tuple[bytes, int] = None
+    _hk_session: bool = False
 
     def __init__(self, loop: asyncio.AbstractEventLoop, config, _secrets, data: ServerData, manager: CompanionManager):
         self._transport: Optional[asyncio.Transport] = None
@@ -634,6 +730,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         logging.debug(f"{self._peername} stopped processing buffer")
 
     async def _handle_frame(self, frame_type, frame_data):
+        # if frame_type == FrameType.NoOp:
+        #     await self._send_frame(FrameType.NoOp, frame_data)
         if frame_type in COMPANION_AUTH_FRAMES:
             await self._handle_auth_frame(frame_type, frame_data)
         elif frame_type in COMPANION_OPACK_FRAMES:
@@ -642,8 +740,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
     async def _handle_play_frame(self, frame_type, frame_data):
         logging.debug(f"{self._peername} handling play frame")
         if self._session is None or self._auth_session is None or not (
-            isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session, CompanionAuthSetupEncryptedSession)
-            ):
+                isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session,
+                                                                                            CompanionAuthSetupEncryptedSession)
+        ):
             logging.debug(f"{self._peername} not ready for this packet")
             return
 
@@ -653,7 +752,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         try:
 
             unencrypted_frame_data = self._auth_session.decrypt(frame_type, frame_data)
-            logging.debug(f"{self._peername} Handling unencrypted play frame with length {len(unencrypted_frame_data)}: {binascii.hexlify(unencrypted_frame_data)}")
+            logging.debug(
+                f"{self._peername} Handling unencrypted play frame with length {len(unencrypted_frame_data)}: {binascii.hexlify(unencrypted_frame_data)}")
 
             frame: dict = opack.unpack(unencrypted_frame_data)[0]
             logging.debug(f"{self._peername} {frame=}")
@@ -705,7 +805,8 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         logging.debug(f"{self._peername} Sending with {frame_type=}")
         logging.debug(f"{self._peername} Sending data: {binascii.hexlify(frame_data)}")
 
-        if (isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session, CompanionAuthSetupEncryptedSession)):
+        if (isinstance(self._auth_session, CompanionAuthEncryptedSession) or isinstance(self._auth_session,
+                                                                                        CompanionAuthSetupEncryptedSession)):
             frame_data = self._auth_session.encrypt(frame_type, frame_data)
             logging.debug(f"{self._peername} Sending encrypted data: {binascii.hexlify(frame_data)}")
 
@@ -723,10 +824,15 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.debug("Client attempted pairing when no session allowed it")
             return
 
+        pin = current_pairing_session["pin"]
+        if self._hk_session:
+            pin = str(randint(0, 9999)).rjust(4, "0")
+            logging.debug(f"using {pin=} for HK session")
+
         self._auth_session = CompanionAuthSetupSession.create(
             self._config["server"]["id"].encode(),
             current_pairing_session["psid"],
-            current_pairing_session["pin"],
+            pin,
             binascii.unhexlify(self._secrets["server"]["private_key"]),
         )
         logging.debug(self._auth_session)
@@ -844,8 +950,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         await self._save_pairing()
 
         self._auth_session = self._auth_session.convert()
-        self._session = CompanionDummySession(self._config, self._secrets)
+        self._session = CompanionDummySession(self._config, self._secrets, self._manager, self._auth_session.hdpid)
         self._session.send_opack = self._send_opack
+        self._session.send_frame = self._send_frame
         # technically connected
         await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 
@@ -891,6 +998,11 @@ class CompanionConnectionProtocol(asyncio.Protocol):
             logging.error(f"{self._peername} bad verify m1 frame, no client public key")
             await self._verify_flow_authentication_error(discard_session=False)  # already done
             return
+        if 25 in pairing_data:
+            logging.debug("NEW HOMEKIT SESSION DETECTED!")
+            self._hk_session = True  # weird new ios18 session
+            await self._verify_flow_authentication_error()
+            return
         client_public_key_bytes = pairing_data[TlvValue.PublicKey]
         self._auth_session = None
         self._auth_session = CompanionAuthVerifySession.create(
@@ -917,7 +1029,7 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         except Exception as e:
             logging.exception(e)
             logging.error(f"{self._peername} could not generate device info signature")
-            await self._verify_flow_authentication_error()
+            await self._verify_flow_authentication_error(discard_session=True)
             return
 
         tlv = write_tlv(
@@ -1001,8 +1113,9 @@ class CompanionConnectionProtocol(asyncio.Protocol):
         })
 
         self._auth_session = self._auth_session.convert()
-        self._session = CompanionDummySession(self._config, self._secrets)
+        self._session = CompanionDummySession(self._config, self._secrets, self._manager, self._auth_session.hdpid)
         self._session.send_opack = self._send_opack
+        self._session.send_frame = self._send_frame
 
         await self._manager.companion_device_connected(self._auth_session.hdpid, self)
 

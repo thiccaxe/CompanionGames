@@ -21,8 +21,13 @@ import binascii
 import copy
 import json
 import logging
+import plistlib
+UID = plistlib.UID
 import random
 import uuid
+from pyatv.protocols.companion.protocol import (
+    FrameType,
+)
 
 import websockets
 
@@ -36,12 +41,14 @@ All the shit goes down here
 class CompanionManager:
     _websocket_server: object
     _companion_server: object
+    _wayland_input: object
 
     def __init__(self, config, secrets, loop: asyncio.AbstractEventLoop, data: ServerData):
         self._config = config
         self._secrets = secrets
         self._loop = loop
         self._data = data
+        self._debug_send_all_touch = False
 
     def get_current_pairing_session(self):
         pairings: dict = self._secrets["pairings"]
@@ -150,6 +157,55 @@ class CompanionManager:
             return
         packet.setdefault("id", random.randint(5_000_000, 2_000_000_000))
         await self._data.connected_website.send(json.dumps(packet))
+
+
+    async def text_inserted(self, hdpid: str, inserted: str):
+        for character in inserted:
+            await self._wayland_input.key_press(character)
+    async def text_delete_count(self, hdpid: str, delete_count: int):
+        for _ in range(delete_count):
+            await self._wayland_input.delete_char()
+    async def on_hidc(self, hdpid: str, packet: dict):
+        logging.debug(f"on_hidc {hdpid=} {packet=} {self._debug_send_all_touch}")
+        content = packet.get("_c", {})
+        hid_c, h_bts = content.get("_hidC", None), content.get("_hBtS", None)
+        if hid_c == 6:
+            if h_bts == 1:
+                await self._wayland_input.lmb_down()
+            elif h_bts == 2:
+                await self._wayland_input.lmb_up()
+        elif hid_c == 19:
+            if h_bts == 2:
+                await self._data.connected_clients[hdpid]._send_opack(FrameType.E_OPACK, {
+                    '_i': '_tiStarted', '_x': random.randint(1, 1000),
+                    '_c': {
+                        '_tiV': 1,
+                        '_tiD': plistlib.dumps({
+                            '$version': 100000,
+                            '$archiver': 'RTIKeyedArchiver',
+                            '$top': {'documentTraits': UID(5), 'sessionUUID': UID(38), 'documentState': UID(1)}, '$objects': ['$null', {'docSt': UID(2), '$class': UID(4), 'originatedFromSource': False}, {'$class': UID(3)}, {'$classname': 'TIDocumentState', '$classes': ['TIDocumentState', 'NSObject']}, {'$classname': 'RTIDocumentState', '$classes': ['RTIDocumentState', 'NSObject']}, {'locApp': UID(8), 'a2bId': True, 'bId': UID(7), 'aId': UID(6), '$class': UID(37), 'cfmType': 87, 'traitsMask': 576, 'userInfo': UID(11), 'tiTraits': UID(9)}, '', 'com.apple.TVWatchList', 'TV', {'flags': 1417693830, 'auxFlags': 1, '$class': UID(10), 'version': 2}, {'$classname': 'TITextInputTraits', '$classes': ['TITextInputTraits', 'NSObject']}, {'NS.keys': [UID(12), UID(13), UID(14), UID(15), UID(16), UID(17), UID(18), UID(19), UID(20), UID(21), UID(22), UID(23), UID(24), UID(25), UID(26), UID(27), UID(28), UID(29)], 'NS.objects': [UID(30), UID(30), UID(31), UID(30), UID(32), UID(33), UID(30), UID(30), UID(30), UID(32), UID(30), UID(30), UID(30), UID(33), UID(33), UID(34), UID(33), UID(30)], '$class': UID(36)}, 'ShouldSuppressSoftwareKeyboard', 'ShouldSuppressSoftwareKeyboardForKeyboardCamera', 'RTIInputDelegateClassName', 'UseAutomaticEndpointing', 'ReturnKeyEnabled', 'ShouldUseDictationSearchFieldBehavior', 'SuppressSoftwareKeyboard', 'ForceFloatingKeyboard', 'HasCustomInputViewController', 'CorrectionLearningAllowed', 'SuppressAssistantBar', 'ForceDisableDictation', 'ForceEnableDictation', 'HasNextKeyResponder', 'InputViewHiddenCount', 'DisableBecomeFirstResponder', 'HasPreviousKeyResponder', 'AcceptsDictationResults', False, 'UISearchBarTextField', True, 0, {'NS.keys': [UID(35)], 'NS.objects': [UID(33)], '$class': UID(36)}, 'disabled', {'$classname': 'NSDictionary', '$classes': ['NSDictionary', 'NSObject']}, {'$classname': 'RTIDocumentTraits', '$classes': ['RTIDocumentTraits', 'NSObject']}, b'\xa3\xc2&u\xa30H\xb7\x99\x01\xcb\xd4L\xa0\xe48']
+                        }, fmt=plistlib.FMT_BINARY)
+                    },
+                    "_t": 1
+                })
+        await self._wayland_input.deltas()
+        if self._debug_send_all_touch:  
+            await self.send_to_website({
+                "event": "companion_games:event/device/interactions/hidc",
+                "data": packet.get("_c", {})
+            })
+
+    async def on_hidt(self, hdpid: str, packet: dict):
+        logging.debug(f"on_hidt {hdpid=} {packet=} {self._debug_send_all_touch}")
+        content = packet.get("_c", {})
+        dx, dy = content.get("_dx", None), content.get("_dy", None)
+        if dx is not None or dy is not None:
+            await self._wayland_input.deltas(dx, dy)
+        if self._debug_send_all_touch:  
+            await self.send_to_website({
+                "event": "companion_games:event/device/interactions/hidt",
+                "data": content
+            })
 
     async def temp_send_text(self, text):
         logging.debug(f"Broadcasting text {text}")
