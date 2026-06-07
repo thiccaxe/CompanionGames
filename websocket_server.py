@@ -34,8 +34,7 @@ class WebsocketServer:
         self._secrets = secrets
         self._loop = loop
         self._data = data
-        self._websocket_server = websockets.serve(self.handler, "", int(self._config["server"]["websocket_port"]),
-                                                  loop=self._loop)
+        self._websocket_server = websockets.serve(self.handler, "", int(self._config["server"]["websocket_port"]))
         self._manager = manager
         self._manager.set_websocket_server(self)
 
