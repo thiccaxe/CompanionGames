@@ -19,7 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import binascii
 import logging
 import uuid
-
+import ipaddress
 import cryptography.exceptions
 from voluptuous import Schema, Required, Optional, Any, All, Range, Length
 import voluptuous.error
@@ -50,6 +50,7 @@ class Config:
                 Required('companion_port'): All(int, Range(min=0, max=65535)),
                 Required('websocket_port'): All(int, Range(min=0, max=65535)),
                 Required('mac'): All(str, Length(17)),
+                Required('ip'): All(lambda _ip: ipaddress.IPv4Address(_ip)),
             }
         })
         self.secrets_schema = Schema({

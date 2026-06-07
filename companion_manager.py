@@ -22,12 +22,12 @@ import copy
 import json
 import logging
 import plistlib
+
+from fruit.frametype import FrameType
 UID = plistlib.UID
 import random
 import uuid
-from pyatv.protocols.companion.protocol import (
-    FrameType,
-)
+
 
 import websockets
 
@@ -162,6 +162,7 @@ class CompanionManager:
     async def text_inserted(self, hdpid: str, inserted: str):
         for character in inserted:
             await self._wayland_input.key_press(character)
+
     async def text_delete_count(self, hdpid: str, delete_count: int):
         for _ in range(delete_count):
             await self._wayland_input.delete_char()
@@ -188,7 +189,16 @@ class CompanionManager:
                     },
                     "_t": 1
                 })
-        await self._wayland_input.deltas()
+        elif hid_c == 8:
+            if h_bts == 2:
+                await self._wayland_input.volume_up()
+        elif hid_c == 9:
+            if h_bts == 2:
+                await self._wayland_input.volume_down()
+        elif hid_c == 18:
+            if h_bts == 1:
+                await self._wayland_input.volume_toggle_mute()
+        # await self._wayland_input.deltas() why was this needed?
         if self._debug_send_all_touch:  
             await self.send_to_website({
                 "event": "companion_games:event/device/interactions/hidc",

@@ -17,7 +17,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import base64
 
-import keyed_archiver
+from fruit.frametype import FrameType
+import fruit.keyed_archiver as keyed_archiver
 
 true = True
 import asyncio, aiofiles
@@ -47,9 +48,7 @@ from random import randbytes, randint
 from srptools import SRPContext, SRPServerSession, constants
 
 from typing import Optional, List, Union, Tuple
-from pyatv.protocols.companion.protocol import (
-    FrameType,
-)
+
 
 from companion_manager import CompanionManager
 from fruit.hkdf import hkdf_expand
@@ -322,6 +321,7 @@ class CompanionDummySession(CompanionSession):
             "_interest": self._handle_interest_packet,
             "FetchAttentionState": self._handle_fetch_attention_state,
             "FetchSiriRemoteInfo": self._handle_fetch_siri_remote_info,
+            "FetchMediaControlStatus": self._handle_media_control_status,
             "_mcc": self._handle_mcc,
             "_touchStart": self._handle_touch_start,
             "_touchStop": self._handle_touch_stop,
@@ -365,11 +365,14 @@ class CompanionDummySession(CompanionSession):
             return
 
         kb_data = plistlib.loads(kb_data_plist)
-        logging.debug(f"{kb_data=}")
+        logging.info(f"{kb_data=}")
         try:
-            insertion, deletion = keyed_archiver.read_archive_properties(
+            insertion = keyed_archiver.read_archive_properties(
                 kb_data,
-                ["textOperations", "keyboardOutput", "insertionText"],
+                ["textOperations", "keyboardOutput", "insertionText"]
+            )
+            deletion = keyed_archiver.read_archive_properties(
+                kb_data,
                 ["textOperations", "keyboardOutput", "deletionCount"]
             )
             if insertion is not None:
@@ -384,10 +387,12 @@ class CompanionDummySession(CompanionSession):
     def _handle_system_info_packet(self, frame):
         response = {
             "_c": {
+                "_msSt": 1,
+                "_msRo": 1,
                 "_pubID": self._config["server"]["mac"],
                 "_mRtID": self._config["server"]["id"],
                 "_dCapF": 1,
-                "_sv": "604.1",
+                "_sv": "715.2",
                 "_bf": 1920,
                 "_lP": int(self._config["server"]["companion_port"]),
                 "_mrID": self._config["server"]["id"],
@@ -416,7 +421,6 @@ class CompanionDummySession(CompanionSession):
                     'com.apple.SeymourSession',
                     'com.apple.wifivelocityd.rapportWake',
                     'com.apple.siri.wakeup',
-                    'com.apple.siri.wakeup',
                     'com.apple.devicediscoveryui.rapportwake',
                     'com.apple.Seymour',
                     'com.apple.networkrelay.on-demand-setup',
@@ -435,14 +439,11 @@ class CompanionDummySession(CompanionSession):
                         'isLocationSharingDevice': False,
                         'aceVersion': '13.0-20A',
                         'userInterfaceIdiom': 'ZEUS',
-                        'isSiriCloudSyncEnabled': True,
+                        'isSiriCloudSyncEnabled': False,
                         'userAssignedDeviceName': self._config["server"]["name"],
                         'trialTreatment': '',
                     },
                     'collectorElectionVersion': float(1.0),
-                    'deviceCapabilities': {
-                        'voiceTriggerEnabled': 1
-                    },
                     'audio-session-coordination.system-info': {
                         'isSupportedAndEnabled': False,
                         'mediaRemoteGroupIdentifier': 'D88585C6-EEEC-4D8A-AE03-93BA62F170AD',  # _airplay._tcp -> gid
@@ -518,7 +519,7 @@ class CompanionDummySession(CompanionSession):
         register_events = frame_content["_regEvents"]
         if "_iMC" in register_events:
             asyncio.create_task(self._send_imc_later(
-                0x0001 | 0x0002 | 0x0010 | 0x0020 | 0x0100 | 0x0200 | 0x0400 | 0x0800 | 0x0040 | 0x0080
+                0x0001 | 0x0002 | 0x0010 | 0x0020 | 0x0100 | 0x0200 | 0x0400 | 0x0800 | 0x0040 | 0x0080 | 0x1000
             ))
         return
 
@@ -538,7 +539,11 @@ class CompanionDummySession(CompanionSession):
 
     def _handle_fetch_siri_remote_info(self, frame):
         return {}
-
+    
+    def _handle_media_control_status(self, frame):
+        return {
+            '_c': {'MediaControlFlags': 0x0001 | 0x0002 | 0x0010 | 0x0020 | 0x0100 | 0x0200 | 0x0400 | 0x0800 | 0x0040 | 0x0080 | 0x1000},
+        }
     def _handle_mcc(self, frame):
         if "_c" not in frame:
             logging.debug("No _c (content) in frame!")

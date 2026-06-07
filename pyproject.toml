@@ -1,0 +1,18 @@
+[project]
+name = "companiongames"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "cryptography>=48.0.0",
+    "pycaw>=20251023 ; sys_platform == 'windows'",
+    "pywin32>=312 ; sys_platform == 'windows'",
+    "rich>=15.0.0",
+    "six>=1.17.0",
+    "tomlkit>=0.15.0",
+    "voluptuous>=0.16.0",
+    "websockets>=16.0",
+    "zeroconf>=0.149.16",
+]

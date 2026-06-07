@@ -4,7 +4,11 @@ This file includes a significant portion of pyatv - see ATTRIBUTION.txt
 """Transparent encryption layer using Chacha20_Poly1305."""
 from typing import Optional
 
-from chacha20poly1305_reuseable import ChaCha20Poly1305Reusable as ChaCha20Poly1305
+
+from cryptography.hazmat.primitives.ciphers.aead import (
+    ChaCha20Poly1305
+)
+# from chacha20poly1305_reuseable import ChaCha20Poly1305Reusable as ChaCha20Poly1305
 
 NONCE_LENGTH = 12
 

@@ -51,10 +51,10 @@ class CompanionGamesZeroconf:
     async def start(self):
         from _socket import inet_aton
         records = {
-            "rpHA": "9948cfb6da55",  #
-            "rpHN": "cef88e5db6fa",  #
-            "rpAD": "3b2210518c58",  #
-            "rpHI": "91756a18d8e5",  #
+            "rpHA": "9948cfb6da56",  #
+            "rpHN": "cef88e5db6fc",  #
+            "rpAD": "3b2210518c59",  #
+            "rpHI": "91756a18d8e6",  #
             "rpMd": "AppleTV5,3",  #
             "rpVr": "523.1.2",  #
             "rpMac": "2",  #
@@ -66,7 +66,7 @@ class CompanionGamesZeroconf:
             self._service = AsyncServiceInfo(
                 "_companion-link._tcp.local.",
                 f"{self._config['server']['name']}._companion-link._tcp.local.",
-                addresses=[inet_aton("192.168.1.35")],
+                addresses=[self._config['server']['ip']],
                 port=int(self._config['server']['companion_port']),
                 properties=records,
                 server=f"{self._config['server']['name']}.local."

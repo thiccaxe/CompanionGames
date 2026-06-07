@@ -18,15 +18,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import asyncio
 import logging
 import os
+import platform
 
 from companion_manager import CompanionManager
 from companion_server import CompanionServer
 from config import Config, ConfigurationLoadError
+from input_backend import InputBackend
 from logger import setup_logging
 from mdns_registration import CompanionGamesZeroconf
 from server_data import ServerData
-from wayland_input import WaylandInput
 from websocket_server import WebsocketServer
+
 
 
 class CompanionGames:
@@ -40,7 +42,12 @@ class CompanionGames:
         self._manager = CompanionManager(self._config, self._secrets, self._loop, self._data)
         self._websocket_server = WebsocketServer(self._config, self._secrets, self._loop, self._data, self._manager)
         self._companion_server = CompanionServer(self._config, self._secrets, self._loop, self._data, self._manager)
-        self._wayland_input = WaylandInput(self._loop)
+        if platform.system() == "Windows":
+            from windows_input import WindowsInput as _InputImpl
+        else:
+            _InputImpl = InputBackend
+
+        self._wayland_input = _InputImpl(self._loop)
         self._manager._wayland_input = self._wayland_input
 
     async def handler(self, websocket):
