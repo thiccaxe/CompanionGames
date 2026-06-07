@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import asyncio
+import ctypes
 import logging
 
 import win32api
@@ -31,6 +32,53 @@ from input_backend import InputBackend
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+
+# SendInput Unicode helpers
+_PUL = ctypes.POINTER(ctypes.c_ulong)
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_UNICODE = 0x0004
+_KEYEVENTF_KEYUP = 0x0002
+
+
+class _KeybdInput(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", _PUL),
+    ]
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", _PUL),
+    ]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("ki", _KeybdInput), ("mi", _MouseInput)]
+
+
+class _Input(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("ii", _InputUnion)]
+
+
+def _send_unicode_key(wchar: int, key_up: bool = False) -> None:
+    flags = _KEYEVENTF_UNICODE | (_KEYEVENTF_KEYUP if key_up else 0)
+    extra = ctypes.c_ulong(0)
+    inp = _Input(
+        type=_INPUT_KEYBOARD,
+        ii=_InputUnion(
+            ki=_KeybdInput(wVk=0, wScan=wchar, dwFlags=flags, time=0, dwExtraInfo=ctypes.pointer(extra))
+        ),
+    )
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(inp))
 
 
 class WindowsInput(InputBackend):
@@ -48,6 +96,23 @@ class WindowsInput(InputBackend):
 
     async def key_press(self, character: str):
         vk_and_shift = win32api.VkKeyScan(character)
+
+        if vk_and_shift == -1:
+            cp = ord(character)
+            if cp > 0xFFFF:
+                # Emoji / outside-BMP: send as UTF-16 surrogate pair
+                cp -= 0x10000
+                high = 0xD800 | (cp >> 10)
+                low = 0xDC00 | (cp & 0x3FF)
+                _send_unicode_key(high)
+                _send_unicode_key(low)
+                _send_unicode_key(low, key_up=True)
+                _send_unicode_key(high, key_up=True)
+            else:
+                _send_unicode_key(cp)
+                _send_unicode_key(cp, key_up=True)
+            return
+
         vk = vk_and_shift & 0xFF
         shift = (vk_and_shift >> 8) & 0xFF
 
